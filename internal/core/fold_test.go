@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package core
 
 import (
@@ -53,11 +56,11 @@ func contentBlocksRaw(types []string) []any {
 
 func TestFoldStreamingAssembly(t *testing.T) {
 	tr := NewTranscript()
-	_ = tr.Apply(ev(t, "turn/start", 1, map[string]any{"turn": 1}))
+	tr.Apply(ev(t, "turn/start", 1, map[string]any{"turn": 1}))
 
 	chunk := func(seq int64, data map[string]any) {
 		t.Helper()
-		_ = tr.Apply(ev(t, "assistant/chunk", seq, map[string]any{
+		tr.Apply(ev(t, "assistant/chunk", seq, map[string]any{
 			"turn": 1, "step": 1, "chunk": data,
 		}))
 	}
@@ -88,7 +91,7 @@ func TestFoldStreamingAssembly(t *testing.T) {
 
 	// Canonical message finalizes: the streaming item is replaced by the
 	// canonical content.
-	_ = tr.Apply(ev(t, "assistant/message", 9, assistantMsg("m1", "text")))
+	tr.Apply(ev(t, "assistant/message", 9, assistantMsg("m1", "text")))
 	if len(tr.Items) != 1 {
 		t.Fatalf("items after canonical = %d", len(tr.Items))
 	}
@@ -104,7 +107,7 @@ func TestFoldStreamingAssembly(t *testing.T) {
 	}
 
 	// Turn end marker.
-	_ = tr.Apply(ev(t, "turn/end", 10, map[string]any{
+	tr.Apply(ev(t, "turn/end", 10, map[string]any{
 		"turn": 1, "reason": map[string]any{"kind": "completed"},
 	}))
 	if len(tr.Items) != 2 {
@@ -126,10 +129,10 @@ func TestFoldStreamingAssembly(t *testing.T) {
 // partial of another step; both rows are kept.
 func TestFoldStreamingStepMismatch(t *testing.T) {
 	tr := NewTranscript()
-	_ = tr.Apply(ev(t, "turn/start", 1, map[string]any{"turn": 1}))
+	tr.Apply(ev(t, "turn/start", 1, map[string]any{"turn": 1}))
 	chunk := func(seq int64, step any, data map[string]any) {
 		t.Helper()
-		_ = tr.Apply(ev(t, "assistant/chunk", seq, map[string]any{
+		tr.Apply(ev(t, "assistant/chunk", seq, map[string]any{
 			"turn": 1, "step": step, "chunk": data,
 		}))
 	}
@@ -138,7 +141,7 @@ func TestFoldStreamingStepMismatch(t *testing.T) {
 
 	msg := assistantMsg("m9", "text")
 	msg["step"] = 2
-	_ = tr.Apply(ev(t, "assistant/message", 4, msg))
+	tr.Apply(ev(t, "assistant/message", 4, msg))
 
 	if len(tr.Items) != 2 {
 		t.Fatalf("items = %d, want 2 (partial kept + canonical appended)", len(tr.Items))
@@ -155,12 +158,12 @@ func TestFoldStreamingStepMismatch(t *testing.T) {
 }
 func TestFoldToolResultMatching(t *testing.T) {
 	tr := NewTranscript()
-	_ = tr.Apply(ev(t, "tool/call", 1, map[string]any{
+	tr.Apply(ev(t, "tool/call", 1, map[string]any{
 		"turn": 1, "step": 1, "callId": "call-1", "name": "bash", "arguments": "ls -la",
 	}))
 	res := assistantMsg("m1", "tool-call")
-	_ = tr.Apply(ev(t, "assistant/message", 2, res))
-	_ = tr.Apply(ev(t, "tool/result", 3, map[string]any{
+	tr.Apply(ev(t, "assistant/message", 2, res))
+	tr.Apply(ev(t, "tool/result", 3, map[string]any{
 		"turn": 1, "step": 1,
 		"message": map[string]any{
 			"id":      "r1",
@@ -198,17 +201,17 @@ func TestFoldToolResultMatching(t *testing.T) {
 
 func TestFoldWatermarkAndEcho(t *testing.T) {
 	tr := NewTranscript()
-	_ = tr.Apply(ev(t, "user/message", 5, map[string]any{
+	tr.Apply(ev(t, "user/message", 5, map[string]any{
 		"id": "u1", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "hi"}},
 		"source":  map[string]any{"kind": "user"},
 	}))
 	// Duplicate (same or lower seq) is dropped.
-	if tr.Apply(ev(t, "user/message", 5, map[string]any{
+	if changed, _ := tr.Apply(ev(t, "user/message", 5, map[string]any{
 		"id": "u1", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "hi"}},
 		"source":  map[string]any{"kind": "user"},
-	})) {
+	})); changed {
 		t.Fatal("duplicate seq should not change the fold")
 	}
 	if len(tr.Items) != 1 {
@@ -220,7 +223,7 @@ func TestFoldWatermarkAndEcho(t *testing.T) {
 	if len(tr.Items) != 2 {
 		t.Fatalf("items with pending = %d", len(tr.Items))
 	}
-	_ = tr.Apply(ev(t, "user/message", 6, map[string]any{
+	tr.Apply(ev(t, "user/message", 6, map[string]any{
 		"id": "u2", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "ping"}},
 		"source":  map[string]any{"kind": "user", "rpcId": "rpc-1"},
@@ -242,13 +245,13 @@ func TestFoldWatermarkAndEcho(t *testing.T) {
 // while still advancing the seq watermark.
 func TestFoldContextInjectionHidden(t *testing.T) {
 	tr := NewTranscript()
-	_ = tr.Apply(ev(t, "user/message", 1, map[string]any{
+	tr.Apply(ev(t, "user/message", 1, map[string]any{
 		"id": "u1", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "hello"}},
 		"source":  map[string]any{"kind": "user"},
 	}))
 	// The runtime-context snapshot: plugin source with form snapshot.
-	_ = tr.Apply(ev(t, "user/message", 2, map[string]any{
+	tr.Apply(ev(t, "user/message", 2, map[string]any{
 		"id": "ctx1", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "Current runtime context. ..."}},
 		"source":  map[string]any{"kind": "plugin", "plugin": "@deepseek-ai/dsh-system-prompt", "form": "snapshot"},
@@ -257,15 +260,15 @@ func TestFoldContextInjectionHidden(t *testing.T) {
 		t.Fatalf("snapshot must not render: items = %+v", tr.Items)
 	}
 	// The snapshot's seq counts for the watermark: a resend is dropped.
-	if tr.Apply(ev(t, "user/message", 2, map[string]any{
+	if changed, _ := tr.Apply(ev(t, "user/message", 2, map[string]any{
 		"id": "ctx1", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "Current runtime context. ..."}},
 		"source":  map[string]any{"kind": "plugin", "plugin": "@deepseek-ai/dsh-system-prompt", "form": "snapshot"},
-	})) {
+	})); changed {
 		t.Fatal("resend of the snapshot must be dropped")
 	}
 	// User messages keep rendering after the hidden one.
-	_ = tr.Apply(ev(t, "user/message", 3, map[string]any{
+	tr.Apply(ev(t, "user/message", 3, map[string]any{
 		"id": "u3", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "next"}},
 		"source":  map[string]any{"kind": "user"},
@@ -274,14 +277,14 @@ func TestFoldContextInjectionHidden(t *testing.T) {
 		t.Fatalf("items = %+v", tr.Items)
 	}
 	// The skill catalog injection is hidden the same way.
-	_ = tr.Apply(ev(t, "user/message", 5, map[string]any{
+	tr.Apply(ev(t, "user/message", 5, map[string]any{
 		"id": "sk1", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "A skill is a reusable set of task-specific instructions..."}},
 		"source":  map[string]any{"kind": "skill-catalog", "form": "catalog"},
 	}))
 	// Plugin notices without a declared form (the user-approval policy
 	// change messages) are model notes too: hidden as well.
-	_ = tr.Apply(ev(t, "user/message", 6, map[string]any{
+	tr.Apply(ev(t, "user/message", 6, map[string]any{
 		"id": "n1", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "The approval policy changed from \"ask\" to \"never\" (changed by the user)."}},
 		"source":  map[string]any{"kind": "plugin", "plugin": "user-approval"},
@@ -321,7 +324,7 @@ func TestFoldPrependOrdering(t *testing.T) {
 
 func TestFoldUnknownEventFallback(t *testing.T) {
 	tr := NewTranscript()
-	_ = tr.Apply(ev(t, "my-plugin/thing", 1, map[string]any{"x": 1}))
+	tr.Apply(ev(t, "my-plugin/thing", 1, map[string]any{"x": 1}))
 	if len(tr.Items) != 1 {
 		t.Fatalf("items = %d", len(tr.Items))
 	}
@@ -398,7 +401,7 @@ func TestItemRenderIdentity(t *testing.T) {
 	}, nil, 1, 1, 10, 1000)
 	tr2.Items = append(tr2.Items, tr2.stamp(a))
 	res := toolResultEv(t, "call-x")
-	_ = tr2.Apply(res)
+	tr2.Apply(res)
 	b := tr2.Items[len(tr2.Items)-1]
 	if b == a {
 		t.Fatal("COW: the result must publish a fresh item pointer")
@@ -417,7 +420,7 @@ func TestItemRenderIdentity(t *testing.T) {
 	tr3 := NewTranscript()
 	ci := tr3.stamp(&Item{Kind: KindCommand, Seq: 5, CmdRun: &protocol.CommandRunData{CommandId: "c1", Name: "model"}})
 	tr3.Items = append(tr3.Items, ci)
-	_ = tr3.Apply(ev(t, "command/done", 6, protocol.CommandDoneData{CommandId: "c1", Kind: "success"}))
+	tr3.Apply(ev(t, "command/done", 6, protocol.CommandDoneData{CommandId: "c1", Kind: "success"}))
 	d := tr3.Items[0]
 	if d == ci {
 		t.Fatal("COW: the done attach must publish a fresh item pointer")

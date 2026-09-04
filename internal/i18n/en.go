@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package i18n
 
 // en is the built-in English catalog: every key the UI renders, with the
@@ -39,16 +42,30 @@ var en = map[string]string{
 	"side.search": "search",
 
 	// ---- dock
-	"dock.tab.jobs":  "JOBS",
-	"dock.tab.todos": "TODOS",
-	"dock.tab.goal":  "GOAL",
-	"dock.tab.queue": "QUEUE",
-	"dock.no.jobs":   "(no background jobs)",
-	"dock.no.todos":  "(no todos yet)",
-	"dock.no.goal":   "(no active goal)",
-	"dock.no.queue":  "(inbox empty)",
-	"dock.goal.line": "phase: %s · rounds: %d/%d",
+	"dock.tab.jobs":      "JOBS",
+	"dock.tab.todos":     "TODOS",
+	"dock.tab.goal":      "GOAL",
+	"dock.tab.queue":     "QUEUE",
+	"dock.tab.subs":      "SUBS",
+	"dock.no.jobs":       "(no background jobs)",
+	"dock.no.todos":      "(no todos yet)",
+	"dock.no.goal":       "(no active goal)",
+	"dock.no.queue":      "(inbox empty)",
+	"dock.no.subs":       "(no subagents)",
+	"dock.goal.line":     "phase: %s · rounds: %d/%d",
+	"dock.subs.children": "has children",
+	"dock.subs.close":    "esc close",
+	"dock.subs.empty":    "(no events on this page)",
+	"dock.subs.error":    "load failed",
+	"dock.subs.hint":     "↑↓ move · enter open · x interrupt",
+	"dock.subs.loading":  "loading…",
+	"dock.subs.oneshot":  "one-shot",
+	"dock.subs.title":    "subagent — ",
 
+	// ---- @ completion (running children + cwd paths)
+	"at.child":   "subagent",
+	"at.dir":     "dir",
+	"at.running": "running",
 	// ---- slash menu & queue strip
 	"menu.footer":    "  %d/%d · ↑↓ select · tab/enter complete · esc close",
 	"menu.local":     " (local)",
@@ -58,8 +75,12 @@ var en = map[string]string{
 
 	// ---- bottom status line
 	"status.hints.idle":    "ctrl+h help · ctrl+q quit",
-	"status.hints.running": "esc interrupt · ctrl+h help",
+	"status.hints.running": "esc interrupt · enter steer · alt+enter queue",
+	"status.hints.dock":    "1-5 tabs · ctrl+b close",
+	"status.hints.side":    "space pick · enter open · esc close",
+	"status.newlines":      "↓ %s new",
 	"status.live":          "live",
+	"status.plainhttp":     "plain http",
 	"status.reconnect":     "reconnect…",
 	// %s slots carry the theme's in/out arrow (↓/↑) + compact number,
 	// prepended by the status bar ("tokens: ↓1.6M ↑21.1K") — locale
@@ -77,6 +98,10 @@ var en = map[string]string{
 	"toast.permission.switched": "permission → %s",
 	"host.down":                 "dsh is not running — start it first with: dsh web --no-open",
 	"toast.host.connecting":     "host: connecting…",
+	"toast.insecure.tls":        "DSH_INSECURE: server certificate not verified",
+	"toast.locale.lag":          "%d new strings fall back to English: your locale file is behind (delete ~/.dsh-cli/locales/%s.json to reseed)",
+	"reconnect.ok":              "reconnected; rebaselining",
+	"reconnect.congested":       "downlink congested; rebaselining",
 	"toast.status":              "dsh-cli %s · dsh %s · %d sessions · cwd %s",
 	"toast.status.mode":         " · mode %s",
 	"toast.status.tokens":       " · tokens %s in / %s out (this turn)",
@@ -159,7 +184,7 @@ var en = map[string]string{
 	"help.nav.side.keys":     "    (in window)          ↑↓/←→ · space select · enter · esc",
 	"help.nav.dock":          "    ctrl+b               toggle dock (input empty)",
 	"help.nav.prevnext":      "    ← / →              prev / next session (workspace + search)",
-	"help.nav.docktab":       "    1 .. 4 / ← / →     dock tab (dock open, input empty)",
+	"help.nav.docktab":       "    1 .. 5 / ← / →     dock tab (dock open, input empty)",
 	"help.sec.session":       "  Session",
 	"help.session.model":     "    ctrl+n               model picker",
 	"help.session.mode":      "    ctrl+o               mode: standard / ptc / minimal / creator",
@@ -182,16 +207,17 @@ var en = map[string]string{
 	"help.popup.reopen":      "    ctrl+i               reopen a parked question / approval",
 
 	// ---- approval & question modals
-	"approval.title":    "tool approval — ",
-	"approval.hint":     "  enter/ctrl+a allow once · esc/ctrl+r reject",
-	"question.title":    "question %d/%d",
-	"question.hint":     "  ↑↓ option · space mark · ←→ question · enter answer · esc close",
-	"question.plan":     "  plan review — ",
-	"question.selected": " · selected",
-	"question.no.opts":  "  (no options — type below)",
-	"question.other":    "other: ",
-	"question.need":     "question %d needs an answer (select or type)",
-	"question.parked":   "question parked — press ctrl+i to answer",
+	"approval.title":      "tool approval — ",
+	"approval.hint":       "  a/enter allow once · d/esc reject",
+	"approval.hint.armed": "  a again to confirm allow · d to back out",
+	"question.title":      "question %d/%d",
+	"question.hint":       "  ↑↓ option · space mark · ←→ question · enter answer · esc close",
+	"question.plan":       "  plan review — ",
+	"question.selected":   " · selected",
+	"question.no.opts":    "  (no options — type below)",
+	"question.other":      "other: ",
+	"question.need":       "question %d needs an answer (select or type)",
+	"question.parked":     "question parked — press ctrl+i to answer",
 
 	// ---- model picker
 	"model.title":        "model",
@@ -262,17 +288,19 @@ var en = map[string]string{
 	"ws.err.notfound":  "no workspace named %q",
 
 	// ---- transcript
-	"transcript.agent":      "agent",
-	"transcript.tool":       "tool",
-	"transcript.think.fold": "  %s thinking… (%s chars, ctrl+e for details)",
-	"transcript.thinking":   "  %s thinking",
-	"transcript.tool.fail":  "✗ fail",
-	"transcript.tool.wait":  "pending",
-	"transcript.truncated":  " (truncated)",
-	"turnend.done":          "  %s turn completed · %s%s",
-	"turnend.interrupted":   "  %s interrupted after %s%s",
-	"turnend.blocked":       "  %s blocked%s",
-	"turnend.maxtokens":     "  %s stopped at max tokens%s",
+	"transcript.agent":       "agent",
+	"transcript.tool":        "tool",
+	"transcript.think.fold":  "  %s thinking… (%s chars · ~%s tok, ctrl+e for details)",
+	"transcript.thinking":    "  %s thinking",
+	"transcript.tool.fail":   "✗ fail",
+	"transcript.tool.wait":   "pending",
+	"transcript.truncated":   " (truncated)",
+	"turnend.done":           "  %s turn completed · %s%s",
+	"turnend.interrupted":    "  %s interrupted after %s%s",
+	"turnend.blocked":        "  %s blocked%s",
+	"turnend.maxtokens":      "  %s stopped at max tokens%s",
+	"turnend.maxtokens.hint": "  /compact to compress context, or switch to a larger-context model",
+	"turnend.unknown":        "ended without a reason",
 
 	// ---- one-shot CLI (status / ls / workspaces)
 	"cli.label.cli":     "dsh-cli",

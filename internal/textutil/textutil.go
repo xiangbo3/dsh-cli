@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package textutil holds rune-safe text helpers shared by every layer that
 // truncates host- or model-controlled strings (error messages, transcript
 // notes, sidebar rows). Byte-wise slicing can split a multi-byte rune and
@@ -92,6 +95,62 @@ func StripControl(s string) string {
 		}
 	}
 	return s
+}
+
+// StripANSI removes complete terminal escape sequences — CSI (ESC [31m,
+// ESC [?25l), OSC/DCS (terminated by BEL or ESC \) and the remaining
+// two-byte ESC x escapes — leaving plain text. The common string without
+// a single ESC byte is returned as-is (fast path).
+func StripANSI(s string) string {
+	if strings.IndexByte(s, 0x1b) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] != 0x1b {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			break // bare trailing ESC: drop
+		}
+		switch s[i+1] {
+		case '[':
+			// CSI: parameter (0x30-0x3f) / intermediate (0x20-0x2f) bytes,
+			// then a final byte 0x40-0x7e.
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j < len(s) {
+				i = j + 1
+			} else {
+				i = len(s)
+			}
+		case ']', 'P':
+			// OSC / DCS: ends at BEL or ST (ESC \); unterminated means the
+			// rest of the string is inside the sequence.
+			j := i + 2
+			for j < len(s) && s[j] != 0x07 {
+				if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
+					j++
+					break
+				}
+				j++
+			}
+			if j < len(s) {
+				i = j + 1
+			} else {
+				i = len(s)
+			}
+		default:
+			i += 2 // other ESC x (cursor save, mode…): drop the pair
+		}
+	}
+	return b.String()
 }
 
 // HumanDuration renders d in user-friendly units instead of raw seconds: the

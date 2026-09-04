@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package client
 
 import (
@@ -181,6 +184,24 @@ func (c *Client) Subagents(ctx context.Context, parentSessionId string) (*protoc
 		return nil, err
 	}
 	return &v, nil
+}
+
+// SubagentHistory pages a child's event log (newest first).
+func (c *Client) SubagentHistory(ctx context.Context, req protocol.SubagentHistoryRequest) (*protocol.HistoryResponse, error) {
+	var v protocol.HistoryResponse
+	if err := c.call(ctx, protocol.MSubagentHistory, req, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// SubagentInterrupt interrupts a running continuable child.
+func (c *Client) SubagentInterrupt(ctx context.Context, parentSessionId, childSessionId string) error {
+	return c.call(ctx, protocol.MSubagentInterrupt, struct {
+		ParentSessionId string `json:"parentSessionId"`
+		ChildSessionId  string `json:"childSessionId"`
+		Mode            string `json:"mode"`
+	}{parentSessionId, childSessionId, "continuable"}, nil)
 }
 
 // ---- workspaces ---------------------------------------------------------

@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Boot cache: the previous boot's roster + workspace registry, persisted
 // to ~/.dsh-cli so the NEXT boot's chrome (top bar title, status bar
 // workspace chip, session window) starts warm instead of waiting for

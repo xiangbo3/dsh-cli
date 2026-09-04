@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -6,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -52,7 +56,17 @@ type Model struct {
 
 	trans  *transCache
 	follow bool
-	sel    textSel // transcript text pick (mouse drag → clipboard; crush-style, see select.go)
+	// followBase: transcript line count when follow disarmed; the "N new"
+	// pill counts lines landed since (transFor pins the owning session).
+	followBase int
+	transFor   string
+	// termTitle caches the last OSC 0 title emitted (no re-write unchanged).
+	termTitle string
+	// turnEndSeen: last-seen turn-end seq per session; flashEnds marks
+	// roster rows whose turn just ended elsewhere for a one-shot flash.
+	turnEndSeen map[string]int64
+	flashEnds   map[string]time.Time
+	sel         textSel // transcript text pick (mouse drag → clipboard; crush-style, see select.go)
 	// band SGR state of the pick highlight, probed once per theme.
 	band       sgrState
 	bandTheme  *Theme
@@ -98,7 +112,12 @@ type Model struct {
 	sideCursorID string
 	dockVisible  bool
 	dockTab      int
+	subDockCur   int // subs-tab cursor over the cached child catalog
 	verbose      bool
+	// expandedTool: the tool card whose result is inlined (x/space peek),
+	// independent of the global verbose flag.
+	expandedTool *core.ToolBlock
+	subFetching  bool // one child-catalog fetch in flight
 
 	inp        *inputLine
 	mergedCmds []slashCmd
@@ -199,12 +218,30 @@ func NewModel(a *app.App) *Model {
 	m.st.SetTurnEndTexter(func(info *core.TurnEndInfo) string {
 		return turnEndText(m.locRef.Load(), info)
 	})
+	// DSH_INSECURE skips the server certificate: the env opted in for
+	// this boot — say it once, plainly.
+	if a.Client().Insecure() {
+		m.toasts = append(m.toasts, toast{
+			level: "warn",
+			text:  loc.T("toast.insecure.tls"),
+		})
+	}
 	if loc.Lang != "en" {
 		m.toasts = append(m.toasts, toast{
 			level: "info",
 			text:  loc.T("lang.switched", loc.Name()),
 			until: time.Now().Add(6 * time.Second),
 		})
+		// A stored locale file behind the built-in table renders the new
+		// strings in English (correct fallback, mixed face): say it once,
+		// with the fix.
+		if n := loc.MissingKeys(); n > 0 {
+			m.toasts = append(m.toasts, toast{
+				level: "info",
+				text:  loc.T("toast.locale.lag", n, loc.Lang),
+				until: time.Now().Add(6 * time.Second),
+			})
+		}
 	}
 	m.refreshCmds()
 	return m
@@ -646,6 +683,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// interface starts on the first frame after the splash.
 		m.transDirty = true
 		m.preloadTrans()
+		m.flashTurnEnds()
 		// A parked answerable frame (ask-user question / tool approval)
 		// for the active session: surface it the way the web client
 		// does — the answer blocks the running turn, so it can't sit
@@ -658,6 +696,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// bootIfNeeded may kick off the first tail load.
 		if c := m.bootIfNeeded(); c != nil {
 			cmds = append(cmds, c)
+		}
+		// Subs tab on screen: keep the child catalog fresh (the cache TTL
+		// alone would leave the tab on its last snapshot).
+		if m.dockVisible && m.dockTab == dockSubs {
+			if c := m.subDockRefresh(); c != nil {
+				cmds = append(cmds, c)
+			}
 		}
 		switch len(cmds) {
 		case 0:
@@ -748,6 +793,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		skillsCachePut(msg.id, msg.skills, msg.err)
 		m.skillsFetching = false
 		return m, m.refreshCmds()
+
+	case subagentsLoadedMsg:
+		// The child catalog landed; store it (negative cache included),
+		// clamp the dock cursor, and re-run the @ completion so the
+		// children appear on the next frame. A failed fetch keeps its
+		// previous rows: an RPC blip must not blank an open catalog.
+		ok := msg.err == nil
+		entries := msg.entries
+		if !ok && len(entries) == 0 {
+			if prev, had := subagentCache[msg.id]; had {
+				entries = prev.entries
+			}
+		}
+		subagentCache[msg.id] = subagentCacheEntry{at: time.Now(), entries: entries, ok: ok}
+		m.subFetching = false
+		m.clampSubDockCur()
+		if m.inp.atOpen {
+			return m, m.refreshAtMenu()
+		}
+		return m, nil
+
+	case subHistoryLoadedMsg:
+		// A child transcript page landed: fill the open window (if it is
+		// still on top) and sort the events into chronological order.
+		sort.SliceStable(msg.events, func(i, j int) bool { return msg.events[i].Event.Seq < msg.events[j].Event.Seq })
+		if sm, ok := m.topModal().(*subagentModal); ok && sm.child == msg.child {
+			sm.loading = false
+			if msg.err != nil {
+				sm.err = m.loc.T("dock.subs.error")
+			}
+			sm.lines = subHistoryLines(sm.loc, msg.events)
+		}
+		return m, nil
 
 	case presetsLoadedMsg:
 		if pk, ok := m.topModal().(*modePicker); ok {
@@ -1267,27 +1345,48 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case km.Type == tea.KeyHome && emptyInput:
 		m.scroll = 0
 		m.follow = false
+		m.followBase = m.trans.total()
 		return m, nil
 	case km.Type == tea.KeyEnd && emptyInput:
 		m.scroll = 1 << 30
 		m.follow = true
+		m.followBase = 0
 		return m, nil
 	case km.Type == tea.KeyCtrlO && emptyInput:
 		return m, m.openModePicker()
-	case m.dockVisible && emptyInput && (km.String() == "1" || km.String() == "2" || km.String() == "3" || km.String() == "4"):
-		// 1-4 jump to the tab at that visual position (left to right).
-		m.dockTab = dockTodos + (map[string]int{"1": 0, "2": 1, "3": 2, "4": 3}[km.String()])
-		return m, nil
+	case m.dockVisible && emptyInput && (km.String() == "1" || km.String() == "2" || km.String() == "3" || km.String() == "4" || km.String() == "5"):
+		// 1-5 jump to the tab at that visual position (left to right).
+		m.dockTab = dockTodos + (map[string]int{"1": 0, "2": 1, "3": 2, "4": 3, "5": 4}[km.String()])
+		m.subDockCur = 0
+		return m, m.subDockRefresh()
 	case m.dockVisible && emptyInput && km.Type == tea.KeyLeft:
 		if m.dockTab > 0 {
 			m.dockTab--
+			m.subDockCur = 0
 		}
-		return m, nil
+		return m, m.subDockRefresh()
 	case m.dockVisible && emptyInput && km.Type == tea.KeyRight:
-		if m.dockTab < dockQueue {
+		// The bound is the LAST tab, not an earlier one: capping at an
+		// earlier index is how the row gets cut off partway through.
+		if m.dockTab < dockGoal {
 			m.dockTab++
+			m.subDockCur = 0
+		}
+		return m, m.subDockRefresh()
+	case m.dockVisible && m.dockTab == dockSubs && emptyInput && km.Type == tea.KeyUp:
+		if m.subDockCur > 0 {
+			m.subDockCur--
 		}
 		return m, nil
+	case m.dockVisible && m.dockTab == dockSubs && emptyInput && km.Type == tea.KeyDown:
+		if entries, _ := subagentEntries(m.activeID()); m.subDockCur < len(entries)-1 {
+			m.subDockCur++
+		}
+		return m, nil
+	case m.dockVisible && m.dockTab == dockSubs && emptyInput && km.Type == tea.KeyEnter:
+		return m, m.openSubTranscript()
+	case m.dockVisible && m.dockTab == dockSubs && emptyInput && km.String() == "x":
+		return m, m.interruptSub()
 	case km.Type == tea.KeyLeft && emptyInput:
 		// ←/→ walk the sessions (the old [ ] chords). While the dock is
 		// open the arrows above keep their dock-tab duty instead.
@@ -1308,6 +1407,12 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case km.Type == tea.KeyCtrlE && emptyInput:
 		m.verbose = !m.verbose
 		m.resetTrans()
+		return m, nil
+	case (km.Type == tea.KeyRunes && km.String() == "x" || km.Type == tea.KeySpace) && emptyInput && m.lastToolBlock() != nil:
+		// Peek at the newest tool card. Gated on a card existing so the
+		// first character typed into an empty input still lands in the
+		// editor (the f-fork contract, extended to the peek key).
+		m.toggleToolExpand()
 		return m, nil
 	case (km.Type == tea.KeyCtrlU || km.Type == tea.KeyCtrlK) && emptyInput && m.activeID() != "":
 		id := m.activeID()
@@ -1352,6 +1457,9 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// would reopen it on recalled "/commands" (and steal the arrows).
 		if m.inp.histPos < 0 {
 			m.inp.refreshMenu(m.mergedCmds)
+			if cmd := m.refreshAtMenu(); cmd != nil {
+				return m, cmd
+			}
 		}
 		if send {
 			return m, m.submit()
@@ -1851,7 +1959,7 @@ func (m *Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	}
 	m.inp.paste(text)
 	m.inp.refreshMenu(m.mergedCmds)
-	return m, nil
+	return m, m.refreshAtMenu()
 }
 
 // modalPickEditor returns the topmost modal's edit field when it holds
@@ -1915,6 +2023,7 @@ func (m *Model) scrollBy(delta int) {
 	if m.follow {
 		m.scroll = m.transMaxOff()
 		m.follow = false
+		m.followBase = m.trans.total()
 	}
 	m.scroll += delta
 	if m.scroll < 0 {
@@ -1927,6 +2036,7 @@ func (m *Model) scrollBy(delta int) {
 		// On the last line: follow is armed so new content keeps the
 		// tail pinned (the view clamps the same way).
 		m.follow = true
+		m.followBase = 0
 	}
 }
 
@@ -2093,6 +2203,9 @@ func (m *Model) submit() tea.Cmd {
 	mode := "queue"
 	if m.running() {
 		mode = "steer"
+	}
+	if m.inp.consumeForceQueue() {
+		mode = "queue"
 	}
 	return m.runCmd("send", func(ctx context.Context) error {
 		_, err := m.app.Prompt(ctx, id, text, mode)
@@ -2507,6 +2620,159 @@ func (m *Model) toggleChord(km tea.KeyMsg) bool {
 	return false
 }
 
+// subDockRefresh fetches the child catalog when the subs tab needs it
+// (stale or missing), and clamps the cursor.
+func (m *Model) subDockRefresh() tea.Cmd {
+	m.clampSubDockCur()
+	id := m.activeID()
+	if id == "" || m.subFetching {
+		return nil
+	}
+	if _, fresh := subagentEntries(id); !fresh {
+		m.subFetching = true
+		return m.cmdFetchSubagents(id)
+	}
+	return nil
+}
+
+// clampSubDockCur keeps the subs-tab cursor inside the cached rows.
+func (m *Model) clampSubDockCur() {
+	id := m.activeID()
+	entries, _ := subagentEntries(id)
+	if m.subDockCur >= len(entries) {
+		m.subDockCur = 0
+	}
+}
+
+// openSubTranscript opens the read-only transcript window for the
+// cursor's child (subagent.history, one page, chronological).
+func (m *Model) openSubTranscript() tea.Cmd {
+	id := m.activeID()
+	// A stale catalog is fine here: the modal pulls its own history page,
+	// and the catalog only supplies the child's identity and label.
+	entries, _ := subagentEntries(id)
+	if len(entries) == 0 || m.subDockCur >= len(entries) {
+		return nil
+	}
+	e := entries[m.subDockCur]
+	label := e.Label
+	if label == "" {
+		label = e.Id
+	}
+	m.openModal(&subagentModal{parent: id, child: e.Id, mode: e.Mode, label: label, loading: true, loc: m.loc})
+	return m.cmdFetchSubHistory(id, e.Id, e.Mode)
+}
+
+// interruptSub interrupts the cursor's child when it is a running
+// continuable (one-shots run to completion; diagnostics have nothing
+// to stop).
+func (m *Model) interruptSub() tea.Cmd {
+	id := m.activeID()
+	entries, _ := subagentEntries(id)
+	if len(entries) == 0 || m.subDockCur >= len(entries) {
+		return nil
+	}
+	e := entries[m.subDockCur]
+	if e.Kind != "child" || e.Mode != "continuable" || e.Activity != "running" {
+		return nil
+	}
+	child := e.Id
+	return m.runCmd("subagent interrupt", func(ctx context.Context) error {
+		return m.app.SubagentInterrupt(ctx, id, child)
+	})
+}
+
+// cmdFetchSubHistory pulls one page of a child's event log off the
+// event loop.
+func (m *Model) cmdFetchSubHistory(parent, child, mode string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		resp, err := m.app.SubagentHistory(ctx, protocol.SubagentHistoryRequest{
+			ParentSessionId: parent, ChildSessionId: child, Mode: mode, MaxMessages: 100,
+		})
+		var events []protocol.HistoryEntry
+		if resp != nil {
+			events = resp.Events
+		}
+		return subHistoryLoadedMsg{child: child, events: events, err: err}
+	}
+}
+
+// toggleToolExpand flips the expanded state of the latest tool card in
+// the active transcript — the peek path for a tool that just finished.
+func (m *Model) toggleToolExpand() {
+	last := m.lastToolBlock()
+	if m.expandedTool == last {
+		m.expandedTool = nil
+	} else {
+		m.expandedTool = last
+	}
+	m.resetTrans()
+}
+
+// lastToolBlock returns the newest tool block in the active session's
+// transcript (nil when there is none).
+func (m *Model) lastToolBlock() *core.ToolBlock {
+	snap := m.st.Get(m.activeID())
+	if snap == nil {
+		return nil
+	}
+	for i := len(snap.Items) - 1; i >= 0; i-- {
+		it := snap.Items[i]
+		if it.Kind != core.KindAssistant {
+			continue
+		}
+		for j := len(it.Blocks) - 1; j >= 0; j-- {
+			if it.Blocks[j].Tool != nil {
+				return it.Blocks[j].Tool
+			}
+		}
+	}
+	return nil
+}
+
+// flashTurnEnds watches every roster row's last item: a fresh turn-end
+// on a session that is not the active one flashes its roster row — the
+// "who just finished" landing spot (the store carries no such marker).
+// First sight of a session records its seq without flashing (history
+// load, not a live event).
+func (m *Model) flashTurnEnds() {
+	if m.flashEnds == nil {
+		m.flashEnds = map[string]time.Time{}
+	}
+	if m.turnEndSeen == nil {
+		m.turnEndSeen = map[string]int64{}
+	}
+	now := time.Now()
+	for sid, until := range m.flashEnds {
+		if now.After(until) {
+			delete(m.flashEnds, sid)
+		}
+	}
+	for _, row := range m.st.Roster() {
+		snap := m.st.Get(row.Id)
+		if snap == nil {
+			continue
+		}
+		items := snap.Items
+		if len(items) == 0 || items[len(items)-1].Kind != core.KindTurnEnd {
+			continue
+		}
+		seq := items[len(items)-1].Seq
+		if prev, ok := m.turnEndSeen[row.Id]; !ok {
+			m.turnEndSeen[row.Id] = seq
+			continue
+		} else if prev == seq {
+			continue
+		}
+		m.turnEndSeen[row.Id] = seq
+		if row.Id != m.activeID() {
+			m.flashEnds[row.Id] = now.Add(1500 * time.Millisecond)
+		}
+	}
+}
+
 // surfacePending opens the active session's next parked answerable
 // frame — a question batch before a tool approval, mirroring the web
 // client's pending-interaction surfacing (the answer blocks the running
@@ -2722,8 +2988,25 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 			m.closeModal()
 		}
 	case *approvalModal:
+		allow := km.Type == tea.KeyEnter || km.Type == tea.KeyCtrlA ||
+			km.Type == tea.KeyRunes && km.String() == "a"
+		// bash-family commands take a second confirming allow: the first
+		// a arms (the hint flips), the second a fires; a stray key
+		// disarms. Non-shell approvals decide on the first key.
+		if allow && mod.bashLike() {
+			if mod.armed {
+				mod.armed = false
+			} else {
+				mod.armed = true
+				return nil, false // armed, still open: absorbed by the rule below
+			}
+		}
+		if !allow && mod.armed {
+			mod.armed = false
+			return nil, false // a stray key while armed: just disarmed
+		}
 		decide := "rejected"
-		if km.Type == tea.KeyEnter || km.Type == tea.KeyCtrlA {
+		if allow {
 			decide = "allowed-once"
 		}
 		m.closeModal()
@@ -2834,6 +3117,11 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 			m.closeModal()
 		}
 		return nil, true
+	case *subagentModal:
+		// A read-only page: any of its handled chords just closes it.
+		if km.Type == tea.KeyEsc || km.Type == tea.KeyEnter || km.Type == tea.KeyCtrlH {
+			m.closeModal()
+		}
 	case *statusModal:
 		// Only the closing chords close the window (the modal's update
 		// consumes them); the walking keys just adjust section/cursor.
@@ -2946,6 +3234,189 @@ func (m *Model) cmdFetchSkills(id string) tea.Cmd {
 		defer cancel()
 		skills, err := m.app.Client().Skills(ctx, id)
 		return skillsLoadedMsg{id: id, skills: skills, err: err}
+	}
+}
+
+// The subagent catalog (running children) feeds the @ completion and the
+// dock roster, cached per session. A failed fetch keeps its previous rows
+// but is never fresh, so a blip cannot fake an empty list.
+const (
+	subagentsCacheTTL = 2 * time.Second
+)
+
+type subagentCacheEntry struct {
+	at      time.Time
+	entries []protocol.SubagentListEntry
+	ok      bool
+}
+
+var subagentCache = map[string]subagentCacheEntry{}
+
+// atMenuItem is one @ completion candidate: a running child's label or a
+// cwd-relative path (directories carry a trailing slash).
+type atMenuItem struct {
+	Text string // inserted on completion
+	Kind string // "child" | "path"
+	Info string // dimmed suffix (activity / "dir")
+}
+
+// subagentEntries returns the cached child catalog (entries, fresh).
+func subagentEntries(id string) ([]protocol.SubagentListEntry, bool) {
+	e, ok := subagentCache[id]
+	if !ok {
+		return nil, false
+	}
+	// A failed fetch is never fresh: it may not claim "no children", and
+	// the pulse re-fetches on the normal cadence while the tab is open.
+	if !e.ok {
+		return e.entries, false
+	}
+	if time.Since(e.at) > subagentsCacheTTL {
+		// Past the window the rows are stale, not gone: the dock and the
+		// @ menu keep showing the last catalog while the pulse re-fetches.
+		return e.entries, false
+	}
+	return e.entries, true
+}
+
+type subagentsLoadedMsg struct {
+	id      string
+	entries []protocol.SubagentListEntry
+	err     error
+}
+
+type subHistoryLoadedMsg struct {
+	child  string
+	events []protocol.HistoryEntry
+	err    error
+}
+
+// cmdFetchSubagents pulls the active session's child catalog off the
+// event loop.
+// refreshAtMenu recomputes the @ completion from the current text: running
+// children first, then cwd paths under the token. It returns the fetch to
+// schedule when the child catalog is stale.
+func (m *Model) refreshAtMenu() tea.Cmd {
+	in := m.inp
+	pos, token := in.atToken()
+	if pos < 0 {
+		in.closeAt()
+		return nil
+	}
+	in.atPos = pos
+	id := m.activeID()
+	var items []atMenuItem
+	fresh := false
+	if id != "" {
+		// Stale rows still seed the menu (the fetch below re-syncs them);
+		// a cold cache waits for the fetch before children appear.
+		if entries, f := subagentEntries(id); f || len(entries) > 0 {
+			fresh = f
+			for _, e := range entries {
+				if e.Kind != "child" {
+					continue
+				}
+				label := e.Label
+				if label == "" {
+					label = e.Id
+				}
+				if !strings.HasPrefix(label, token) {
+					continue
+				}
+				info := ""
+				if e.Activity == "running" {
+					info = m.loc.T("at.running")
+				}
+				items = append(items, atMenuItem{Text: label, Kind: "child", Info: info})
+			}
+		}
+		if snap := m.st.Get(id); snap != nil {
+			for _, p := range atPaths(snap.Summary.Cwd, token) {
+				info := ""
+				if strings.HasSuffix(p, "/") {
+					info = m.loc.T("at.dir")
+				}
+				items = append(items, atMenuItem{Text: p, Kind: "path", Info: info})
+			}
+		}
+	}
+	in.atMenu = items
+	in.atOpen = len(items) > 0
+	if in.atOpen {
+		if in.atCur >= len(items) {
+			in.atCur = len(items) - 1
+		}
+	}
+	if in.atOpen && id != "" && !fresh && !m.subFetching {
+		m.subFetching = true
+		return m.cmdFetchSubagents(id)
+	}
+	return nil
+}
+
+// atPaths lists cwd-relative candidates under root matching the token:
+// a bounded walk (three levels, 800 entries, hidden and heavy dirs
+// skipped), directories completed with a trailing slash.
+func atPaths(root, token string) []string {
+	if root == "" {
+		return nil
+	}
+	var out []string
+	seen := 0
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if seen >= 800 || depth > 3 {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if seen >= 800 {
+				return
+			}
+			name := e.Name()
+			if name == "." || strings.HasPrefix(name, ".") ||
+				name == "node_modules" || name == "vendor" || name == "target" {
+				continue
+			}
+			seen++
+			rel, err := filepath.Rel(root, filepath.Join(dir, name))
+			if err != nil {
+				continue
+			}
+			if e.IsDir() {
+				rel += "/"
+			}
+			if strings.HasPrefix(rel, token) {
+				out = append(out, rel)
+			}
+			if e.IsDir() {
+				walk(filepath.Join(dir, name), depth+1)
+			}
+		}
+	}
+	walk(root, 1)
+	sort.Strings(out)
+	if len(out) > 50 {
+		out = out[:50]
+	}
+	return out
+}
+
+func (m *Model) cmdFetchSubagents(id string) tea.Cmd {
+	return func() tea.Msg {
+		// 15s: the host walks its session roster for the catalog, which
+		// outruns a 5s budget on a loaded host and fakes an empty list.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cat, err := m.app.Client().Subagents(ctx, id)
+		var entries []protocol.SubagentListEntry
+		if cat != nil {
+			entries = cat.Entries
+		}
+		return subagentsLoadedMsg{id: id, entries: entries, err: err}
 	}
 }
 

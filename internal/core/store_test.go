@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package core
 
 import (
@@ -135,7 +138,7 @@ func TestStoreLoadTailRebuilds(t *testing.T) {
 		t.Fatal("hasMore lost")
 	}
 	// Live event beyond the tail seq applies.
-	changed := s.Event("s1", ev(t, "user/message", 2, map[string]any{
+	changed, _ := s.Event("s1", ev(t, "user/message", 2, map[string]any{
 		"id": "u2", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "world"}},
 		"source":  map[string]any{"kind": "user"},
@@ -147,7 +150,7 @@ func TestStoreLoadTailRebuilds(t *testing.T) {
 		t.Fatalf("items = %d", len(got.Items))
 	}
 	// Duplicate tail event is dropped by the watermark.
-	dup := s.Event("s1", &resp.Events[0].Event)
+	dup, _ := s.Event("s1", &resp.Events[0].Event)
 	if dup {
 		t.Fatal("duplicate seq should not change state")
 	}
@@ -468,7 +471,8 @@ func TestStoreNoticeStripsControl(t *testing.T) {
 	s.Notify(Notice{Level: "err", Text: "bad\x1b[31mred\x1b[38m"})
 	select {
 	case n := <-s.Notices():
-		if n.Text != "bad[31mred[38m" {
+		// complete escape sequences are dropped, not their ESC bytes
+		if n.Text != "badred" {
 			t.Fatalf("notice text = %q", n.Text)
 		}
 	case <-time.After(time.Second):
@@ -512,5 +516,54 @@ func TestStoreBootStaleRunningSettles(t *testing.T) {
 	// remain true; liveness is now the running flag alone).
 	if snap.Running {
 		t.Fatalf("Running = true after live list says not running (stale cache not re-baselined)")
+	}
+}
+
+// TestANSISanitizeAtBoundary pins S1: host-controlled display strings are
+// stripped of escape sequences at the store boundary, so a hostile host
+// cannot smuggle SGR/OSC into the terminal.
+func TestANSISanitizeAtBoundary(t *testing.T) {
+	s := NewStore("http://x")
+
+	// session title: event level
+	// JSON strings must escape control bytes the way the host does
+	titleData := `{"title": "evil\u001b]0;x\u0007 name"}`
+	s.Event("s1", &protocol.SessionEvent{Type: "session/title", Data: mustJSON(titleData)})
+	if got := s.TitleFor("s1"); got != "evil name" {
+		t.Fatalf("title = %q", got)
+	}
+	// session title: projection level (higher seq wins, sanitized too)
+	s.MuxProjection("s1", "title", 2, mustJSON(`"\u001b[31mproj\u001b[0m"`))
+	if got := s.TitleFor("s1"); got != "proj" {
+		t.Fatalf("projection title = %q", got)
+	}
+	// cached roster titles (previous boot's data is still host data)
+	s2 := NewStore("http://x")
+	s2.CacheRoster([]CacheRow{{Id: "s9", Title: "cached\x1b[4m name"}})
+	if got := s2.TitleFor("s9"); got != "cached name" {
+		t.Fatalf("cached title = %q", got)
+	}
+	// workspace titles (upsert path)
+	s.WorkspaceUpsert(&protocol.WorkspaceView{WorkspaceId: "w1", Path: "/tmp", Title: "ws\x1b]7;f\x07 title"})
+	if ws := s.WorkspaceByID("w1"); ws == nil || ws.Title != "ws title" {
+		t.Fatalf("workspace title = %+v", ws)
+	}
+	// job labels
+	s.MuxJobs("s1", []protocol.JobView{{Id: "j1", Kind: "bash", Label: "job\x1b[1m label", Status: "running"}})
+	snap := s.Get("s1")
+	if snap == nil || len(snap.Jobs) != 1 || snap.Jobs[0].Label != "job label" {
+		t.Fatalf("jobs = %+v", snap)
+	}
+	// approval context (tool name + reason)
+	s.ApprovalRequested("s1", "rpc1", "a1", "tool\x1b[33mname", "c1", "the \x1b[1mreason", "{}")
+	snap = s.Get("s1")
+	if len(snap.Approvals) != 1 || snap.Approvals[0].ToolName != "toolname" || snap.Approvals[0].Reason != "the reason" {
+		t.Fatalf("approvals = %+v", snap.Approvals)
+	}
+	// question cards (question text + option labels)
+	s.QuestionRequested("s1", "rpc2", []protocol.QuestionItem{{Id: "q1", Question: "ask\x1b]8;;u\x1b\\?", Options: []protocol.QuestionOption{{Label: "ok\x1b[0m"}}}})
+	snap = s.Get("s1")
+	if len(snap.Questions) != 1 || snap.Questions[0].Questions[0].Question != "ask?" || snap.Questions[0].Questions[0].Options[0].Label != "ok" {
+		t.Fatalf("questions = %+v", snap.Questions)
 	}
 }

@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package protocol carries the wire vocabulary of the DeepSeek Harness web
 // server (dsh-host-apiproxy contract): the four-quadrant RPC envelope, the
 // unary method registry, and the downlink frame decoders.

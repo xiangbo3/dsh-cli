@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -24,7 +27,7 @@ func dockProbeModel(t *testing.T) *Model {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	t.Setenv("DSH_CLI_HOME", t.TempDir()) // no inherited startup language
 	m := NewModel(a)
@@ -129,11 +132,12 @@ func TestDockFrameGridExact(t *testing.T) {
 	}
 }
 
-// TestDockTabOrder pins the dock's left-to-right tab order: todos first,
-// then jobs, goal, queue. The default page is todos (tab 0), 1-4 jump by
-// visual position, and ←→ walk the same order.
+// TestDockTabOrder pins the dock's left-to-right tab order: todos,
+// jobs, subs, queue, goal. The default page is todos (tab 0), 1-5 jump
+// by visual position, and ←→ walk the same order.
 func TestDockTabOrder(t *testing.T) {
 	m := dockProbeModel(t)
+	m.W = 140 // five tabs plus the status pill need room to avoid clipping
 	m.dockVisible = true
 
 	tabRow := func() string {
@@ -146,7 +150,7 @@ func TestDockTabOrder(t *testing.T) {
 		return ""
 	}
 	row := tabRow()
-	for _, pair := range [][2]string{{"TODOS", "JOBS"}, {"JOBS", "GOAL"}, {"GOAL", "QUEUE"}} {
+	for _, pair := range [][2]string{{"TODOS", "JOBS"}, {"JOBS", "SUBS"}, {"SUBS", "QUEUE"}, {"QUEUE", "GOAL"}} {
 		if i, j := strings.Index(row, pair[0]), strings.Index(row, pair[1]); i < 0 || j < 0 || i > j {
 			t.Fatalf("tab order must keep %s before %s: %q", pair[0], pair[1], row)
 		}
@@ -165,6 +169,22 @@ func TestDockTabOrder(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	if m.dockTab != dockJobs {
 		t.Fatalf("dockTab = %d, want jobs after →", m.dockTab)
+	}
+
+	// → must reach the end of the row (the bound is the last tab, not an
+	// earlier one — capping partway is how the row gets cut off) and stop
+	// there; ← walks back to the first tab and stops there too.
+	for _, want := range []int{dockSubs, dockQueue, dockGoal, dockGoal} {
+		m.Update(tea.KeyMsg{Type: tea.KeyRight})
+		if m.dockTab != want {
+			t.Fatalf("dockTab = %d, want %d", m.dockTab, want)
+		}
+	}
+	for _, want := range []int{dockQueue, dockSubs, dockJobs, dockTodos, dockTodos} {
+		m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		if m.dockTab != want {
+			t.Fatalf("dockTab = %d, want %d", m.dockTab, want)
+		}
 	}
 }
 
@@ -292,5 +312,78 @@ func TestDockJobDurZeroStart(t *testing.T) {
 				t.Fatalf("job line %q must show 0s, got %q", ln, tail)
 			}
 		}
+	}
+}
+
+// TestSubTranscriptEscClose pins the child-window path end to end: the
+// subs tab renders the catalog, enter opens the window, the history page
+// fills it, and esc closes it (the close switch must know this modal
+// type — a read-only page that swallows its keys without closing would
+// swallow every key after it and hang the UI).
+func TestSubTranscriptEscClose(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	fh := newFakeHost(t)
+	fh.subagents = []protocol.SubagentListEntry{{
+		Kind: "child", Id: "c1", Mode: "continuable", Activity: "running",
+		Label: "Fast child: count README lines",
+	}}
+	fh.histories["c1"] = []protocol.HistoryEntry{{
+		Event: protocol.SessionEvent{Type: "user/message", Seq: 1, Data: json.RawMessage(
+			`{"role":"user","content":[{"type":"text","text":"probe"}]}`)},
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	a := app.New(fh.URL)
+	a.Start(ctx)
+	t.Setenv("DSH_CLI_HOME", t.TempDir())
+	m := NewModel(a)
+	m.W, m.H = 120, 30
+	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp/x"}})
+	m.st.SetActive("s1")
+
+	m.dockVisible = true
+	m.dockTab = dockSubs
+	cmd := m.subDockRefresh()
+	if cmd == nil {
+		t.Fatal("no catalog fetch scheduled for an empty cache")
+	}
+	upd := func(msg tea.Msg) {
+		nv, c := m.Update(msg)
+		m = nv.(*Model)
+		cmd = c
+	}
+	upd(cmd())
+	if entries, fresh := subagentEntries("s1"); !fresh || len(entries) != 1 {
+		t.Fatalf("catalog = %d entries fresh=%v, want the seeded child", len(entries), fresh)
+	}
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Fast child: count README") {
+		t.Fatalf("subs tab does not render the child row: %q", out)
+	}
+	if !strings.Contains(out, "● Fast child") {
+		t.Fatalf("running child must carry the activity dot: %q", out)
+	}
+
+	// Enter opens the window and pulls the child's history page.
+	upd(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.topModal() == nil {
+		t.Fatal("enter did not open the child window")
+	}
+	if cmd == nil {
+		t.Fatal("history fetch not scheduled on open")
+	}
+	upd(cmd())
+	sm, ok := m.topModal().(*subagentModal)
+	if !ok || sm.loading {
+		t.Fatalf("window not filled with the history page")
+	}
+	if got := stripANSI(m.View()); !strings.Contains(got, "probe") {
+		t.Fatalf("window does not show the child's user message: %q", got)
+	}
+
+	// Esc closes it (the regression: the close switch lacked this type).
+	upd(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.topModal() != nil {
+		t.Fatalf("esc left the child window open: %T", m.topModal())
 	}
 }

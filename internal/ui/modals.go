@@ -1,6 +1,10 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 
@@ -11,6 +15,79 @@ import (
 
 	"github.com/charmbracelet/bubbletea"
 )
+
+// subagentModal is a read-only window over one child's event log
+// (subagent.history, one page, chronological).
+type subagentModal struct {
+	parent, child, mode, label string
+	loading                    bool
+	err                        string
+	lines                      []string
+	loc                        *i18n.Locale
+}
+
+func (s subagentModal) title() string { return s.loc.T("dock.subs.title") + s.label }
+
+func (s subagentModal) hint() string { return s.loc.T("dock.subs.close") }
+
+func (s subagentModal) view(m *Model, w, h int) []string {
+	th := m.th
+	if s.loading {
+		return []string{th.Faint().Render("  " + s.loc.T("dock.subs.loading"))}
+	}
+	if s.err != "" {
+		return []string{th.Warn().Render("  " + s.err)}
+	}
+	if len(s.lines) == 0 {
+		return []string{th.Faint().Render("  " + s.loc.T("dock.subs.empty"))}
+	}
+	return s.lines
+}
+
+func (s subagentModal) update(km tea.KeyMsg) (tea.Cmd, bool) {
+	switch km.Type {
+	case tea.KeyEsc, tea.KeyEnter, tea.KeyCtrlH:
+		return nil, true
+	}
+	return nil, false
+}
+
+// subHistoryLines renders a child's event page: user and assistant
+// messages in full, tool calls as one line each, turn ends as a rule.
+func subHistoryLines(loc *i18n.Locale, events []protocol.HistoryEntry) []string {
+	var lines []string
+	for _, he := range events {
+		ev := he.Event
+		switch ev.Type {
+		case "user/message":
+			var msgp protocol.Message
+			if json.Unmarshal(ev.Data, &msgp) != nil {
+				continue
+			}
+			text := protocol.SessionTextMessage(&msgp)
+			for _, ln := range wrapPlain(text, 100) {
+				lines = append(lines, "  > "+ln)
+			}
+		case "assistant/message":
+			var d protocol.AssistantMessageEventData
+			if json.Unmarshal(ev.Data, &d) != nil {
+				continue
+			}
+			text := protocol.SessionTextMessage(&d.Message)
+			for _, ln := range wrapPlain(text, 100) {
+				lines = append(lines, "  "+ln)
+			}
+		case "tool/call":
+			var d protocol.ToolCallEventData
+			if json.Unmarshal(ev.Data, &d) == nil && d.Name != "" {
+				lines = append(lines, "    "+d.Name)
+			}
+		case "turn/end":
+			lines = append(lines, "  ──")
+		}
+	}
+	return lines
+}
 
 // modal is the common shape of every overlay.
 type modal interface {
@@ -403,8 +480,9 @@ func (h *helpModal) paste(text string) bool { return h.ed.paste(text) }
 // ---- approval -----------------------------------------------------------------
 
 type approvalModal struct {
-	pen *core.ApprovalPend
-	loc *i18n.Locale
+	pen   *core.ApprovalPend
+	loc   *i18n.Locale
+	armed bool // bash-family: the first allow arms, the second confirms
 }
 
 func (a approvalModal) title() string {
@@ -412,25 +490,70 @@ func (a approvalModal) title() string {
 }
 
 func (a approvalModal) view(m *Model, w, h int) []string {
+	th := m.th
 	var lines []string
 	if a.pen.Reason != "" {
 		lines = append(lines, wrapPlain(a.pen.Reason, w-6)...)
 	}
 	if a.pen.Args != "" {
-		args := textutil.Truncate(a.pen.Args, 900, "…")
-		lines = append(lines, "", "  "+args)
+		lines = append(lines, "")
+		if cmd, ok := commandLine(a.pen.ToolName, a.pen.Args); ok {
+			// The actionable line on its own, wrapped: the 900-char raw
+			// dump is the fallback for payloads without one.
+			for _, ln := range wrapPlain(cmd, w-8) {
+				lines = append(lines, "  "+th.System().Render(ln))
+			}
+			return lines
+		}
+		lines = append(lines, "  "+textutil.Truncate(a.pen.Args, 900, "…"))
 	}
 	return lines
 }
 
-func (a approvalModal) update(km tea.KeyMsg) (tea.Cmd, bool) {
-	switch {
-	case km.Type == tea.KeyEnter || km.Type == tea.KeyCtrlA:
-		return nil, true
-	case km.Type == tea.KeyEsc || km.Type == tea.KeyCtrlR:
-		return nil, true
+// commandLine pulls the actionable line out of a tool's args: shell tools
+// carry a "command" JSON field, file tools a path. The raw args stay the
+// fallback for shapes without either.
+func commandLine(tool, args string) (string, bool) {
+	var d struct {
+		Command  string `json:"command"`
+		Cmd      string `json:"cmd"`
+		FilePath string `json:"file_path"`
 	}
-	return nil, false
+	if err := json.Unmarshal([]byte(args), &d); err != nil {
+		return "", false
+	}
+	t := strings.ToLower(tool)
+	switch {
+	case d.Command != "" && (t == "bash" || t == "shell" || t == "exec" || strings.Contains(t, "run")):
+		return d.Command, true
+	case (t == "edit" || t == "write" || t == "read" || strings.Contains(t, "file")) && d.FilePath != "":
+		return d.FilePath, true
+	case d.Command != "":
+		return d.Command, true
+	}
+	return "", false
+}
+
+// update classifies the key; the armed gate and the response ride the
+// dispatch case (which owns the modal's mutation).
+func (a *approvalModal) update(km tea.KeyMsg) (tea.Cmd, bool) {
+	switch {
+	case km.Type == tea.KeyEnter || km.Type == tea.KeyCtrlA ||
+		km.Type == tea.KeyRunes && km.String() == "a":
+		return nil, true // allow
+	case km.Type == tea.KeyEsc || km.Type == tea.KeyCtrlR ||
+		km.Type == tea.KeyRunes && km.String() == "d":
+		return nil, true // reject
+	}
+	return nil, false // absorbed by the popup keyboard rule
+}
+
+// bashLike reports whether the pending tool runs shell commands — the
+// approval most often mis-reads, so its allow takes a confirming second
+// key.
+func (a *approvalModal) bashLike() bool {
+	n := strings.ToLower(a.pen.ToolName)
+	return n == "bash" || n == "shell" || n == "exec" || strings.Contains(n, "run")
 }
 
 // ---- questions ----------------------------------------------------------------
@@ -1010,7 +1133,10 @@ func effortSuffix(e string) string {
 	return " (" + e + ")"
 }
 
-func (a approvalModal) hint() string {
+func (a *approvalModal) hint() string {
+	if a.armed {
+		return a.loc.T("approval.hint.armed")
+	}
 	return a.loc.T("approval.hint")
 }
 

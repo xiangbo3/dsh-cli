@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package i18n
 
 import (
@@ -252,10 +255,11 @@ func TestLoadDefaultPrecedence(t *testing.T) {
 	}
 }
 
-// TestBoot pins the startup seeding: a fresh home gets the storage dir
-// with en.json and zh.json generated from the built-in tables (a
-// search-dir catalog is NOT the seed source); a second Boot (with a user
-// edit in place) clobbers nothing.
+// TestBoot pins the startup seeding and version sync: a fresh home gets
+// the storage dir with en.json and zh.json generated from the built-in
+// tables (a search-dir catalog is NOT the seed source); a user edit
+// within the same program version survives a later Boot; a file stamped
+// by another version (or unmarked) is regenerated.
 func TestBoot(t *testing.T) {
 	home := t.TempDir()
 	src := t.TempDir()
@@ -279,22 +283,22 @@ func TestBoot(t *testing.T) {
 	}
 	// The generated en.json mirrors the built-in table exactly (same
 	// format as the locales/en.json template, TestDumpENFile).
-	want, err := json.MarshalIndent(en, "", "  ")
+	want, err := catalogFile(en)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(enB, append(want, '\n')) {
-		t.Errorf("generated en.json is not the built-in table dump")
+	if !bytes.Equal(enB, want) {
+		t.Errorf("generated en.json is not the built-in table dump (version marker included)")
 	}
 	// The generated zh.json mirrors the built-in Chinese table exactly
 	// (same format as the locales/zh.json template, TestDumpZHFile) —
 	// NOT the unrelated catalog that happens to sit in a search dir.
-	wantZH, err := json.MarshalIndent(zh, "", "  ")
+	wantZH, err := catalogFile(zh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(zhB, append(wantZH, '\n')) {
-		t.Errorf("generated zh.json is not the built-in table dump")
+	if !bytes.Equal(zhB, wantZH) {
+		t.Errorf("generated zh.json is not the built-in table dump (version marker included)")
 	}
 	var zhMap map[string]string
 	if err := json.Unmarshal(zhB, &zhMap); err != nil {
@@ -311,8 +315,15 @@ func TestBoot(t *testing.T) {
 	if got := l.T("top.idle"); got != "· idle" {
 		t.Errorf("booted English face = %q", got)
 	}
-	// A user edit to en.json survives a later Boot and becomes the face.
-	user := []byte(`{"no.session":"(my edit)"}`)
+	// A user edit to en.json survives a later Boot (the version marker
+	// stays in the file) and becomes the face.
+	doc := catalogDoc(en)
+	doc["no.session"] = "(my edit)"
+	user, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user = append(user, '\n')
 	if err := os.WriteFile(filepath.Join(store, "en.json"), user, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -326,5 +337,46 @@ func TestBoot(t *testing.T) {
 	}
 	if l, _, err := Load("en"); err != nil || l.T("no.session") != "(my edit)" {
 		t.Errorf("Load(en) after edit = %v %q, %v", l, l.T("no.session"), err)
+	}
+	// A catalog stamped by an older dsh-cli (or one the marker was lost
+	// from) is regenerated: the current version lands, stale values go.
+	stale := map[string]string{versionKey: "0.0.1", "no.session": "(old build)"}
+	staleB, err := json.MarshalIndent(stale, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "en.json"), append(staleB, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	Boot()
+	b, err = os.ReadFile(filepath.Join(store, "en.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(b, want) {
+		t.Errorf("stale-version en.json was not regenerated: %s", b)
+	}
+}
+
+// TestMissingKeys pins the locale-lag detection: a catalog behind the
+// built-in table reports exactly the uncovered keys; a current table
+// reports zero.
+func TestMissingKeys(t *testing.T) {
+	if got := English().MissingKeys(); got != 0 {
+		t.Fatalf("English().MissingKeys() = %d, want 0", got)
+	}
+	l := &Locale{Lang: "xx", msgs: map[string]string{}}
+	if got := l.MissingKeys(); got != len(en) {
+		t.Fatalf("empty catalog MissingKeys() = %d, want %d", got, len(en))
+	}
+	one := &Locale{Lang: "xx", msgs: map[string]string{}}
+	k := ""
+	for key := range en {
+		k = key
+		break
+	}
+	one.msgs[k] = "x"
+	if got := one.MissingKeys(); got != len(en)-1 {
+		t.Fatalf("one-key catalog MissingKeys() = %d, want %d", got, len(en)-1)
 	}
 }

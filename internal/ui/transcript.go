@@ -1,6 +1,10 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -505,6 +509,22 @@ func renderUser(m *Model, it *core.Item, width int) []string {
 	return out
 }
 
+// estimateTokens rough-sizes a block for the fold line: CJK runs about a
+// token per char, the rest about four chars per token (DeepSeek ballpark —
+// a display hint, never a meter).
+func estimateTokens(s string) int {
+	cjk, other := 0, 0
+	for _, r := range s {
+		switch {
+		case r >= 0x2E80 && r <= 0x9FFF, r >= 0x3000 && r <= 0x30FF, r >= 0xFF00 && r <= 0xFFEF:
+			cjk++
+		default:
+			other++
+		}
+	}
+	return cjk + other/4
+}
+
 func renderAssistant(m *Model, it *core.Item, width int, label string) []string {
 	th := m.th
 	name := m.loc.T("transcript.agent")
@@ -526,7 +546,8 @@ func renderAssistant(m *Model, it *core.Item, width int, label string) []string 
 			out = append(out, indentLines(m.mdRender(b.Text, width-2, ""), "  ")...)
 		case "reasoning":
 			if !m.verbose {
-				out = append(out, th.Faint().Render(m.loc.T("transcript.think.fold", th.Glyph.Thought, compactInt(int64(len(b.Text))))))
+				out = append(out, th.Faint().Render(m.loc.T("transcript.think.fold", th.Glyph.Thought,
+					compactInt(int64(len(b.Text))), compactInt(int64(estimateTokens(b.Text))))))
 			} else {
 				out = append(out, th.Faint().Render(m.loc.T("transcript.thinking", th.Glyph.Thought)))
 				out = append(out, indentLines(wrapLines(b.Text, width-6), "    ")...)
@@ -570,6 +591,9 @@ func renderToolCard(m *Model, tb *core.ToolBlock, width int) []string {
 	default:
 		stateStyle = th.Faint
 	}
+	if tb.Done && tb.CallTime > 0 && tb.DoneTime > tb.CallTime {
+		state += " " + textutil.HumanDuration(time.Duration(tb.DoneTime-tb.CallTime)*time.Millisecond)
+	}
 	// Flat spec line: "  ▸ name args …" with the state LED right-aligned
 	// like a product status readout.
 	baseW := 2 + runewidth.StringWidth(th.Glyph.Tool) + 1 + runewidth.StringWidth(name)
@@ -594,13 +618,58 @@ func renderToolCard(m *Model, tb *core.ToolBlock, width int) []string {
 	}
 	line += strings.Repeat(" ", pad) + stateStyle().Render(state)
 	out := []string{line}
-	if m.verbose && tb.ResultText != "" {
+	if pv := diffPreview(m, tb, width); len(pv) > 0 {
+		out = append(out, pv...)
+	}
+	if (m.verbose || tb == m.expandedTool) && tb.ResultText != "" {
 		res := strings.TrimRight(tb.ResultText, "\n")
 		if len(res) > 4000 {
 			res = textutil.Truncate(res, 3997, "…") + m.loc.T("transcript.truncated")
 		}
 		res = strings.ReplaceAll(res, "\n", " ")
 		out = append(out, indentLines(plainLines(m, th.Faint(), res, width-5), "     ")...)
+	}
+	return out
+}
+
+// diffPreview renders a compact before/after preview for the
+// edit/write family (the args carry file_path plus old/new strings or
+// full content): a path header and a few unified-style lines. It shows
+// on the card itself — a peek at what the tool is about to change.
+func diffPreview(m *Model, tb *core.ToolBlock, width int) []string {
+	th := m.th
+	var d struct {
+		FilePath  string `json:"file_path"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+		Content   string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(tb.Args), &d); err != nil || d.FilePath == "" {
+		return nil
+	}
+	var oldL, newL []string
+	if d.OldString != "" || d.NewString != "" {
+		oldL = strings.Split(d.OldString, "\n")
+		newL = strings.Split(d.NewString, "\n")
+	} else {
+		newL = strings.Split(d.Content, "\n")
+	}
+	const capLines = 4
+	var out []string
+	out = append(out, th.Faint().Render("     "+textutil.Truncate(d.FilePath, width-9, "…")))
+	nOld := len(oldL)
+	for i := 0; i < nOld && i < capLines; i++ {
+		out = append(out, "     "+th.Err().Render("- ")+th.Faint().Render(truncDisplay(oldL[i], width-11)))
+	}
+	if nOld > capLines {
+		out = append(out, th.Faint().Render(fmt.Sprintf("     … +%d more", nOld-capLines)))
+	}
+	nNew := len(newL)
+	for i := 0; i < nNew && i < capLines; i++ {
+		out = append(out, "     "+th.Ok().Render("+ ")+th.Subtle().Render(truncDisplay(newL[i], width-11)))
+	}
+	if nNew > capLines {
+		out = append(out, th.Faint().Render(fmt.Sprintf("     … +%d more", nNew-capLines)))
 	}
 	return out
 }
@@ -620,13 +689,21 @@ func renderTurnEnd(m *Model, it *core.Item) []string {
 	case "blocked":
 		return []string{th.Warn().Render(m.loc.T("turnend.blocked", th.Glyph.Warn, tok))}
 	case "max-tokens":
-		return []string{th.Warn().Render(m.loc.T("turnend.maxtokens", th.Glyph.Warn, tok))}
+		return []string{
+			th.Warn().Render(m.loc.T("turnend.maxtokens", th.Glyph.Warn, tok)),
+			th.Faint().Render(m.loc.T("turnend.maxtokens.hint")),
+		}
 	default:
+		// Unknown protocol kind: the reason is the message — the raw kind
+		// is an English wire constant that must not leak into localized UI.
 		msg := it.TurnEnd.Reason
 		if msg == "" && it.TurnEnd.Error != nil {
 			msg = it.TurnEnd.Error.Message
 		}
-		return []string{th.Err().Render("  " + th.Glyph.Cross + " " + it.TurnEnd.Kind + " — " + msg + tok)}
+		if msg == "" {
+			msg = m.loc.T("turnend.unknown")
+		}
+		return []string{th.Err().Render("  " + th.Glyph.Cross + " " + msg + tok)}
 	}
 }
 

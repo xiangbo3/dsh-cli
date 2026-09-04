@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -26,6 +29,12 @@ type inputLine struct {
 	menuOpen bool
 	menuCur  int
 
+	// @ completion (running children + cwd paths), parallel to the slash menu.
+	atMenu []atMenuItem
+	atOpen bool
+	atCur  int
+	atPos  int // rune index of the '@' that opened the menu (-1 when none)
+
 	// Prompt history (up/down keys): every submitted text, newest last;
 	// histPos indexes it while browsing (-1 while not) and histDraft /
 	// histDraftCur hold the pre-browsing buffer so down can restore it.
@@ -33,6 +42,8 @@ type inputLine struct {
 	histPos      int
 	histDraft    string
 	histDraftCur int
+
+	forceQueue bool // Alt+Enter: a queued send over the implicit steer
 }
 
 // histCap bounds the prompt history (oldest entries fall off).
@@ -41,6 +52,13 @@ const histCap = 100
 // newInputLine starts out of the history browse (histPos -1): the zero
 // value would look like "at the oldest entry".
 func newInputLine() *inputLine { return &inputLine{histPos: -1} }
+
+// consumeForceQueue clears and reports a pending force-queue (Alt+Enter).
+func (in *inputLine) consumeForceQueue() bool {
+	f := in.forceQueue
+	in.forceQueue = false
+	return f
+}
 
 // refreshMenu recomputes the slash menu from the current text.
 func (in *inputLine) refreshMenu(cmds []slashCmd) {
@@ -88,6 +106,71 @@ func (in *inputLine) closeMenu() {
 	in.menuCur = 0
 }
 
+// atMenuStart returns the first visible @ menu row for a window of n.
+func (in *inputLine) atMenuStart(n int) int {
+	vis := n
+	if vis > len(in.atMenu) {
+		vis = len(in.atMenu)
+	}
+	start := in.atCur - vis/2
+	if start < 0 {
+		start = 0
+	}
+	if start > len(in.atMenu)-vis {
+		start = len(in.atMenu) - vis
+	}
+	if start < 0 {
+		start = 0
+	}
+	return start
+}
+
+// atToken returns the position of the '@' that starts the current word
+// and the word typed after it (-1, "" when the caret is not inside one).
+func (in *inputLine) atToken() (int, string) {
+	text := in.value()
+	caret := in.cur
+	for i := caret - 1; i >= 0; i-- {
+		if text[i] == '@' {
+			if i == 0 || text[i-1] == ' ' || text[i-1] == '\n' || text[i-1] == '\t' {
+				return i, text[i+1 : caret]
+			}
+			return -1, "" // an '@' mid-word is not a trigger
+		}
+		if text[i] == ' ' || text[i] == '\n' || text[i] == '\t' {
+			return -1, "" // whitespace before any '@'
+		}
+	}
+	return -1, ""
+}
+
+// closeAt drops the @ completion state.
+func (in *inputLine) closeAt() {
+	in.atOpen = false
+	in.atMenu = nil
+	in.atCur = 0
+	in.atPos = -1
+}
+
+// completeAt inserts the selected @ item at the token position (a
+// trailing space unless the text already ends in a separator).
+func (in *inputLine) completeAt() {
+	if !in.atOpen || len(in.atMenu) == 0 || in.atPos < 0 {
+		return
+	}
+	in.histDetach()
+	it := in.atMenu[in.atCur]
+	text := in.value()
+	newText := text[:in.atPos] + it.Text
+	if !strings.HasSuffix(newText, " ") && !strings.HasSuffix(newText, "/") {
+		newText += " "
+	}
+	in.sel.reset()
+	in.val = []rune(newText)
+	in.cur = len(in.val)
+	in.closeAt()
+}
+
 // value returns the full text.
 func (in *inputLine) value() string { return string(in.val) }
 
@@ -120,6 +203,7 @@ func (in *inputLine) clear() {
 	in.sel.reset()
 	in.menuOpen = false
 	in.menuCur = 0
+	in.closeAt()
 	in.histPos = -1
 }
 
@@ -638,6 +722,22 @@ func (in *inputLine) handleKey(m *Model, km tea.KeyMsg) (ok, send bool) {
 		}
 		in.complete()
 		return true, c.Local && (strings.TrimSpace(in.value()) == "/"+c.Name)
+	case in.atOpen && km.Type == tea.KeyUp:
+		if in.atCur > 0 {
+			in.atCur--
+		}
+		return true, false
+	case in.atOpen && km.Type == tea.KeyDown:
+		if in.atCur < len(in.atMenu)-1 {
+			in.atCur++
+		}
+		return true, false
+	case in.atOpen && (km.Type == tea.KeyTab || (km.Type == tea.KeyEnter && !km.Alt)):
+		in.completeAt()
+		return true, false
+	case in.atOpen && km.Type == tea.KeyEsc:
+		in.closeAt()
+		return true, false
 	case km.Type == tea.KeyUp:
 		// Prompt history (the slash menu keeps the arrows while open).
 		// A multi-line buffer walks its physical rows first: while the
@@ -675,7 +775,9 @@ func (in *inputLine) handleKey(m *Model, km tea.KeyMsg) (ok, send bool) {
 		return true, false
 	case km.Type == tea.KeyEnter:
 		if km.Alt {
-			return true, false
+			// Alt+Enter forces a queued send even mid-run (a plain Enter
+			// would steer); submit consumes the flag.
+			in.forceQueue = true
 		}
 		if !in.empty() {
 			return true, true

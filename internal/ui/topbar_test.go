@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -24,7 +27,10 @@ var nameVer = "dsh-cli " + version.Version
 func TestTopBarNameVersionBeforeState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	// Dead port: a live host's async session.list could land its title
+	// and model readout in the bar before the width assertions, and the
+	// title has no truncation budget of its own in sub-30-column bars.
+	a := app.New("http://127.0.0.1:3999")
 	a.Start(ctx)
 	m := NewModel(a)
 	m.splashOff = true
@@ -49,6 +55,33 @@ func TestTopBarNameVersionBeforeState(t *testing.T) {
 	}
 }
 
+// TestTopBarTitleYieldsToNameVersion pins the narrow-window contract:
+// with a long session title plus mode and model readouts, the title takes
+// the truncation budget so the name/version is never pushed off screen.
+func TestTopBarTitleYieldsToNameVersion(t *testing.T) {
+	a := app.New("http://127.0.0.1:3999")
+	m := NewModel(a)
+	m.splashOff = true
+	m.W, m.H = 120, 30
+	m.st.SetSessions([]protocol.SessionSummary{
+		{SessionId: "s1", AgentPreset: "code"},
+	})
+	m.st.SetActive("s1")
+	m.st.SetConnected(true)
+	m.st.Event("s1", &protocol.SessionEvent{Type: "session/title", Data: []byte("{\"title\":\"a-very-long-session-title-that-keeps-going-and-going\"}")})
+	m.st.Event("s1", &protocol.SessionEvent{Type: "request/context", Data: []byte("{\"provider\":\"acme\",\"model\":\"acme-max-32k\",\"contextWindow\":1000}")})
+
+	for _, w := range []int{30, 40, 60, 120} {
+		bar := m.topBar(w)
+		if pw := plainWidth(bar); pw > w {
+			t.Fatalf("topBar(%d) = %d cells wide, want <= %d", w, pw, w)
+		}
+		if !strings.Contains(stripANSI(bar), nameVer) {
+			t.Fatalf("topBar(%d) lost the name+version: %q", w, stripANSI(bar))
+		}
+	}
+}
+
 // TestTopBarAlwaysFirstLine pins the frame budget: whatever the transient
 // layers hold (toast shelf, slash menu), the rendered frame must fit the
 // window height exactly — an overflowing frame is clipped from the top by
@@ -56,7 +89,7 @@ func TestTopBarNameVersionBeforeState(t *testing.T) {
 func TestTopBarAlwaysFirstLine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.splashOff = true
@@ -100,7 +133,7 @@ func TestTopBarAlwaysFirstLine(t *testing.T) {
 func TestMiniViewKeepsTopBar(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.splashOff = true

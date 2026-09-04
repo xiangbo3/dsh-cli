@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package core
 
 import (
@@ -91,25 +94,25 @@ func TestTurnStartLostOnMidTurnRebaseline(t *testing.T) {
 func TestTurnStartStaleAfterRebaseline(t *testing.T) {
 	tr := NewTranscript()
 	// Previous turn (turn 9), completed, inside the tail page.
-	_ = tr.Apply(ev(t, "turn/start", 1, map[string]any{"turn": 9}))
-	_ = tr.Apply(ev(t, "turn/end", 2, map[string]any{"turn": 9, "reason": map[string]any{"kind": "completed"}}))
+	tr.Apply(ev(t, "turn/start", 1, map[string]any{"turn": 9}))
+	tr.Apply(ev(t, "turn/end", 2, map[string]any{"turn": 9, "reason": map[string]any{"kind": "completed"}}))
 	if tr.TurnStartAt == 0 {
 		t.Fatal("previous turn's start recorded")
 	}
 	// Current turn's (turn 10) first event arrives after the re-baseline.
-	_ = tr.Apply(ev(t, "assistant/chunk", 3, map[string]any{
+	tr.Apply(ev(t, "assistant/chunk", 3, map[string]any{
 		"turn": 10, "step": 1, "chunk": map[string]any{"type": "text", "text": "x"},
 	}))
 	if tr.TurnStartAt != 0 {
 		t.Fatalf("TurnStartAt = %d, want 0 (stale start of turn 9)", tr.TurnStartAt)
 	}
 	// A legit start for the current turn (a later turn in the log) wins.
-	_ = tr.Apply(ev(t, "turn/start", 4, map[string]any{"turn": 10}))
+	tr.Apply(ev(t, "turn/start", 4, map[string]any{"turn": 10}))
 	if tr.TurnStartAt == 0 {
 		t.Fatal("legit turn/start must restore the start")
 	}
 	// Same-numbered events never invalidate (the normal live path).
-	_ = tr.Apply(ev(t, "assistant/chunk", 5, map[string]any{
+	tr.Apply(ev(t, "assistant/chunk", 5, map[string]any{
 		"turn": 10, "step": 1, "chunk": map[string]any{"type": "text", "text": "y"},
 	}))
 	if tr.TurnStartAt == 0 {

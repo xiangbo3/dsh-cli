@@ -1,0 +1,16 @@
+# Minimal lint config: the cheap whole-tree linters only. check stays
+# vet + race tests + build; lint is an extra pass when the binary exists.
+run:
+  timeout: 5m
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - misspell
+  disable:
+    - errcheck # the TUI codebase intentionally ignores many errors
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 20

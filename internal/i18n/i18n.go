@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package i18n is the dsh-cli UI's language layer: locale detection from
 // the user's environment, loading of per-language UI catalogs (JSON
 // config files), and string lookup that always falls back to the
@@ -6,10 +9,11 @@
 //
 // Catalog storage lives in ~/.dsh-cli/locales (with the rest of the
 // program's local data): at startup Boot generates en.json and zh.json
-// there from the built-in English / Chinese tables when absent (the
-// stored files are the live, user-editable faces); catalogs the user
-// adds for other languages are read from the SearchDirs paths (the
-// storage dir among them).
+// there from the built-in English / Chinese tables when absent or when
+// they carry another program's version marker (the stored files are the
+// live, user-editable faces); catalogs the user adds for other
+// languages are read from the SearchDirs paths (the storage dir among
+// them).
 package i18n
 
 import (
@@ -22,6 +26,7 @@ import (
 	"strings"
 
 	"dsh-cli/internal/config"
+	"dsh-cli/internal/version"
 )
 
 // Locale is one UI language: its catalog code and the message table it
@@ -108,6 +113,20 @@ func (l *Locale) T(key string, args ...any) string {
 		args = args[:n]
 	}
 	return fmt.Sprintf(t, args...)
+}
+
+// MissingKeys counts the built-in English table's keys this locale's
+// catalog does not cover: a stored locale file behind a newer build
+// (those strings fall back to English, so the face reads mixed). 0 =
+// current.
+func (l *Locale) MissingKeys() int {
+	n := 0
+	for k := range en {
+		if _, ok := l.msgs[k]; !ok {
+			n++
+		}
+	}
+	return n
 }
 
 // aliases maps the common non-standard spellings of a language name to
@@ -206,13 +225,51 @@ func SearchDirs() []string {
 	return out
 }
 
+// versionKey is the reserved catalog key that records which dsh-cli
+// version generated a stored en.json / zh.json: on a version mismatch
+// Boot regenerates the file from the built-in table, so the face always
+// matches the program (a user edit keeps the marker and survives within
+// one version; an upgrade reseeds).
+const versionKey = "_version"
+
+// catalogDoc is one built-in table tagged with its generating version.
+func catalogDoc(table map[string]string) map[string]string {
+	doc := make(map[string]string, len(table)+1)
+	for k, v := range table {
+		doc[k] = v
+	}
+	doc[versionKey] = version.Version
+	return doc
+}
+
+// catalogFile renders one built-in table as the stored catalog bytes.
+func catalogFile(table map[string]string) ([]byte, error) {
+	b, err := json.MarshalIndent(catalogDoc(table), "", "  ")
+	return append(b, '\n'), err
+}
+
+// fileVersion reads the generating version recorded in a stored catalog
+// ("" when the file is absent, unparseable, or predates the marker).
+func fileVersion(p string) string {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	var doc map[string]string
+	if json.Unmarshal(b, &doc) != nil {
+		return ""
+	}
+	return doc[versionKey]
+}
+
 // Boot prepares the locale storage dir for a run — the startup hook
-// (idempotent, best-effort): it creates ~/.dsh-cli/locales and
-// generates en.json / zh.json there from the built-in English / Chinese
-// tables when absent (the stored files are the live faces Load reads;
-// a user edit there survives restarts). An existing file is the user's:
-// never clobbered. Any failure (no home, read-only fs) degrades to the
-// built-in face, never to a startup failure.
+// (idempotent, best-effort): it creates ~/.dsh-cli/locales and keeps
+// en.json / zh.json in step with the program. A file stamped with this
+// dsh-cli version (possibly user-edited since — the marker stays in the
+// file) is kept as-is; a file from another version, or an unmarked one
+// from an older build, is regenerated from the built-in table. Any
+// failure (no home, read-only fs) degrades to the built-in face, never
+// to a startup failure.
 func Boot() {
 	d := Dir()
 	if d == "" {
@@ -221,19 +278,17 @@ func Boot() {
 	if err := os.MkdirAll(d, 0o755); err != nil {
 		return
 	}
-	seed := func(name string, content []byte) {
+	sync := func(name string, table map[string]string) {
 		p := filepath.Join(d, name)
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(p); err == nil && fileVersion(p) == version.Version {
 			return
 		}
-		os.WriteFile(p, content, 0o644) // best-effort
+		if b, err := catalogFile(table); err == nil {
+			os.WriteFile(p, b, 0o644) // best-effort
+		}
 	}
-	if b, err := json.MarshalIndent(en, "", "  "); err == nil {
-		seed("en.json", append(b, '\n'))
-	}
-	if b, err := json.MarshalIndent(zh, "", "  "); err == nil {
-		seed("zh.json", append(b, '\n'))
-	}
+	sync("en.json", en)
+	sync("zh.json", zh)
 }
 
 // Load builds the locale for lang from its catalog file (searched per

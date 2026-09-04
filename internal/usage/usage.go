@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package usage is dsh-cli's persistent token-usage statistics. Every
 // counted assistant message folds into a per-session, per-workspace,
 // per-local-day table under ~/.dsh-cli (usage.json), and the /status
@@ -271,7 +274,8 @@ func (r *Recorder) flushLocked() {
 		return
 	}
 	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	// 0600: per-session token totals — private stat, not world data
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return
 	}
 	if err := os.Rename(tmp, r.path); err != nil {

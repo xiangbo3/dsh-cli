@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -57,7 +60,7 @@ func forkModel(t *testing.T) *Model {
 	m.W, m.H = 120, 40
 	m.st.SetActive("s1")
 	for _, ev := range forkLog() {
-		if !m.st.Event("s1", &ev) {
+		if ok, _ := m.st.Event("s1", &ev); !ok {
 			t.Fatalf("event %s/%d not applied", ev.Type, ev.Seq)
 		}
 	}

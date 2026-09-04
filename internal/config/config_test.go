@@ -1,11 +1,18 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package config tests: the precedence ladder and the silent-failure
 // semantics of an optional preference file.
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"dsh-cli/internal/version"
 )
 
 func writeConfig(t *testing.T, dir, content string) {
@@ -75,5 +82,92 @@ func TestLoadMalformedIsSilent(t *testing.T) {
 	writeConfig(t, dir, `{"url": "http://ok:1", "future": 42}`)
 	if c := Load(); c.URL != "http://ok:1" {
 		t.Fatalf("unknown key: Load = %+v, want the url kept", c)
+	}
+}
+
+// TestPlainHTTP pins the clear-transport detection shared by the one-shot
+// stderr note and the TUI's persistent status-bar marker.
+func TestPlainHTTP(t *testing.T) {
+	cases := []struct {
+		u    string
+		want bool
+	}{
+		{u: "http://10.0.0.5:3080", want: true},
+		{u: "http://host.example:3080", want: true},
+		{u: "https://host.example:3080", want: false},
+		{u: "http://127.0.0.1:3080", want: false},
+		{u: "http://[::1]:3080", want: false},
+		{u: "http://localhost:3080", want: false},
+		{u: "", want: false},
+		{u: "not a url", want: false},
+		{u: "http://", want: false},
+	}
+	for _, c := range cases {
+		if got := PlainHTTP(c.u); got != c.want {
+			t.Errorf("PlainHTTP(%q) = %v, want %v", c.u, got, c.want)
+		}
+	}
+}
+
+// TestConfigVersionMigration pins the _version gate: a stale config file
+// (no marker, or stamped by another dsh-cli version) is completed with
+// the current version's options and re-stamped, keeping user values; a
+// current file is left byte-identical; a malformed file is left alone.
+func TestConfigVersionMigration(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DSH_CLI_HOME", dir)
+
+	// Unmarked file from an older build: values kept, marker added.
+	writeConfig(t, dir, "{ \"url\": \"http://old:1\", \"language\": \"zh\" }")
+	c := Load()
+	if c.URL != "http://old:1" || c.Language != "zh" || c.Version != version.Version {
+		t.Fatalf("migrated config = %+v, want the values kept and the current version", c)
+	}
+	onDiskB, err := os.ReadFile(filepath.Join(dir, File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk Config
+	if err := json.Unmarshal(onDiskB, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Version != version.Version {
+		t.Errorf("stored file version = %q, want %q", onDisk.Version, version.Version)
+	}
+
+	// File stamped by another version: re-stamped, values kept.
+	writeConfig(t, dir, "{ \"_version\": \"0.0.1\", \"url\": \"http://old2:1\" }")
+	c = Load()
+	if c.URL != "http://old2:1" || c.Version != version.Version {
+		t.Fatalf("re-stamped config = %+v, want the url kept and the current version", c)
+	}
+
+	// A current file survives Load byte-identical (no rewrite churn).
+	cur := Config{Version: version.Version, URL: "http://cur:1"}
+	curB, err := json.MarshalIndent(cur, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, File), append(curB, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	Load()
+	b, err := os.ReadFile(filepath.Join(dir, File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(b, append(curB, '\n')) {
+		t.Errorf("Load rewrote a current-version file: %s", b)
+	}
+
+	// Malformed: the silent-default path must not clobber the file.
+	writeConfig(t, dir, "{not json")
+	Load()
+	b, err = os.ReadFile(filepath.Join(dir, File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "{not json" {
+		t.Errorf("Load rewrote a malformed file: %s", b)
 	}
 }

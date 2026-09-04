@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -141,7 +144,7 @@ func TestModelBarReadout(t *testing.T) {
 // model the transcript keeps the previous name": assistant headers render
 // the live model label and the render cache is invalidated when it changes.
 func TestTranscriptFlushesOnModelSwitch(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)
@@ -264,7 +267,7 @@ func TestPickerEnterRecordsSelection(t *testing.T) {
 // the display name the roster advertises (and the top bar does), not the
 // raw model id.
 func TestPickerHeaderUsesDisplayName(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)
@@ -292,7 +295,7 @@ func TestPickerHeaderUsesDisplayName(t *testing.T) {
 // cumulative in/out totals (same aggregation as the turn markers) close
 // the status bar, and the removed key hints stay gone.
 func TestStatusTokenTotals(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)
@@ -362,7 +365,7 @@ func TestStatusTokenTotals(t *testing.T) {
 // request/context window drives a 10-cell bar with its percentage behind
 // the key hints, and the bar stays hidden until a window is advertised.
 func TestStatusContextBar(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)
@@ -427,7 +430,7 @@ func TestStatusContextBar(t *testing.T) {
 // pressureTokens against contextWindow, and a projection without a
 // window leaves the bar off.
 func TestStatusContextPressureBar(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)

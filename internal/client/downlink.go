@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package client
 
 import (
@@ -198,8 +201,10 @@ func (s *Stream) dial(ctx context.Context, url string) (*websocket.Conn, error) 
 		return nil, err
 	}
 	// The library's 32KiB default read limit would kill the stream on any
-	// oversized frame (a large approval arg dump or projection); match the
-	// unary maxBody intent (4MiB is far above a legitimate frame).
+	// oversized frame (a large approval arg dump or projection); 4MiB is
+	// far above a legitimate frame. This cap is independent of the unary
+	// response limit (16MiB, rpc.go): the two channels carry different
+	// shapes and keep separate caps.
 	conn.SetReadLimit(4 << 20)
 	return conn, nil
 }

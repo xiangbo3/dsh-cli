@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -74,7 +77,7 @@ func TestSplashArtShape(t *testing.T) {
 func TestSplashRevealAndEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.W, m.H = 100, 30
@@ -136,7 +139,7 @@ func TestSplashRevealAndEnd(t *testing.T) {
 func TestSplashSkipAndNarrowFallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 
 	m := NewModel(a)

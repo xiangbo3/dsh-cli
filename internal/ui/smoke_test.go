@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -8,6 +11,7 @@ import (
 	"time"
 
 	"dsh-cli/internal/app"
+	"dsh-cli/internal/protocol"
 
 	"github.com/charmbracelet/bubbletea"
 )
@@ -18,7 +22,7 @@ func TestTUISmokeHeadless(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 
 	m := NewModel(a)
@@ -77,7 +81,9 @@ func TestInputSpaceAndQuit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	a := app.New("http://127.0.0.1:3080")
+	fh := newFakeHost(t)
+	fh.sessions = []protocol.SessionSummary{{SessionId: "s1"}} // a row to boot: no auto-create mid-keystream
+	a := app.New(fh.URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.splashOff = true // headless key test: no boot animation

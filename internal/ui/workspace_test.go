@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -12,7 +15,7 @@ import (
 func keyDown() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyDown} }
 
 func TestResolveWorkspaceRef(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	m := NewModel(a)
 	m.st.SetWorkspaces([]protocol.WorkspaceView{
 		{WorkspaceId: "w1", Path: "/home/u/alpha", Title: "alpha"},
@@ -56,7 +59,7 @@ func TestResolveWorkspaceRef(t *testing.T) {
 }
 
 func TestWorkspaceModalRowsAndPerform(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	m := NewModel(a)
 	m.W, m.H = 100, 30
 	m.st.SetWorkspaces([]protocol.WorkspaceView{
@@ -96,7 +99,7 @@ func TestWorkspaceModalRowsAndPerform(t *testing.T) {
 // must accumulate characters through the normal key path without closing the
 // modal or firing a wire action (the first char used to submit immediately).
 func TestWorkspaceModalInputDoesNotAutoSubmit(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	m := NewModel(a)
 	m.W, m.H = 100, 30
 	m.st.SetWorkspaces([]protocol.WorkspaceView{

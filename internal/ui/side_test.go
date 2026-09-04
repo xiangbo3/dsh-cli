@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -49,7 +52,7 @@ func TestSessionListCardSurface(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	if m.th.CCardBG == "" {
@@ -75,7 +78,7 @@ func TestSideSearchFilter(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.st.SetSessions([]protocol.SessionSummary{
@@ -405,7 +408,7 @@ func TestSessionWindowCardSurface(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	if m.th.CCardBG == "" {

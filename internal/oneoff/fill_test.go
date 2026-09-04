@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Fill's URL defaulting: an empty Opts.URL falls back to the config file,
 // then the built-in default (the flag layer already merged --url/$DSH_URL
 // into Opts.URL, so here "empty" means neither was given).

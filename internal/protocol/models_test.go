@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package protocol
 
 import "testing"
@@ -19,7 +22,7 @@ func TestDisplayName(t *testing.T) {
 		},
 	}
 	cases := []struct{ provider, model, want string }{
-		{"acme", "acme-alpha", "Acme Alpha"}, // provider match
+		{"acme", "acme-alpha", "Acme Alpha"},  // provider match
 		{"other", "acme-alpha", "Acme Alpha"}, // provider exists, model elsewhere: cross-group
 		{"ghost", "acme-alpha", "Acme Alpha"}, // provider not advertised: cross-group
 		{"acme", "other-gamma", "Gamma"},      // model lives in another group

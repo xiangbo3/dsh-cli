@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package client is the DSH transport layer: unary HTTP RPC, the answer
 // channel (POST /api/respond), and the dual WebSocket downlink.
 package client
@@ -33,6 +36,9 @@ type Client struct {
 	// token is the DSH_TOKEN bearer credential ("" = none; the host
 	// decides whether a connection without one is acceptable).
 	token string
+	// insecure marks the DSH_INSECURE boot: the transport skips the
+	// server certificate check (DSH_CA extra-trust does not count).
+	insecure bool
 }
 
 // New builds a client for base (e.g. "http://127.0.0.1:3080").
@@ -45,6 +51,7 @@ type Client struct {
 //	DSH_INSECURE  =1/=true: https without server certificate verification
 func New(base string) *Client {
 	var transport http.RoundTripper = http.DefaultTransport
+	insecure := false
 	if ca := os.Getenv("DSH_CA"); ca != "" {
 		if pem, err := os.ReadFile(ca); err == nil {
 			pool := x509.NewCertPool()
@@ -60,11 +67,13 @@ func New(base string) *Client {
 			t := dt.Clone()
 			t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 — explicit env opt-in
 			transport = t
+			insecure = true
 		}
 	}
 	return &Client{
-		base:  strings.TrimRight(base, "/"),
-		token: os.Getenv("DSH_TOKEN"),
+		base:     strings.TrimRight(base, "/"),
+		token:    os.Getenv("DSH_TOKEN"),
+		insecure: insecure,
 		http: &http.Client{
 			Timeout:   60 * time.Second,
 			Transport: transport,
@@ -80,6 +89,10 @@ func New(base string) *Client {
 		},
 	}
 }
+
+// Insecure reports whether DSH_INSECURE is active for this client (the
+// transport skips the server certificate check).
+func (c *Client) Insecure() bool { return c.insecure }
 
 // IsDown reports whether err is a transport-level HTTP failure —
 // connection refused, DNS miss, dead route: the kind of error that means

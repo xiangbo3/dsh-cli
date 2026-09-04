@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package ui is the bubbletea presentation layer of dsh-cli.
 //
 // The interface follows the Braun (Dieter Rams) design language: warm

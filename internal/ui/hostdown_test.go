@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Host-down hint tests: the "start dsh web" toast fires once per outage,
 // hostDownGrace after the downlink stays dark, and re-arms after recovery.
 package ui

@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package app glues the transport layer to the state engine: the downlink
 // frame pump, the re-baseline rule, and the typed RPC wrappers the UI drives.
 package app
@@ -13,6 +16,7 @@ import (
 
 	"dsh-cli/internal/client"
 	"dsh-cli/internal/core"
+	"dsh-cli/internal/i18n"
 	"dsh-cli/internal/protocol"
 	"dsh-cli/internal/usage"
 )
@@ -31,6 +35,16 @@ type App struct {
 	// not stack concurrent or back-to-back re-baselines.
 	rebBusy atomic.Bool
 	rebLast atomic.Int64 // unixmilli of the last re-baseline start
+
+	// Roster-refresh coalescing (user actions): one fetch in flight and at
+	// most one per 2s, so a rename/fork/create burst cannot stack concurrent
+	// session.list calls.
+	rosterBusy atomic.Bool
+	rosterLast atomic.Int64 // unixmilli of the last roster refresh start
+
+	// ctx is the app lifetime (Start's parameter); internal background work
+	// hangs off it instead of context.Background().
+	ctx context.Context
 }
 
 // New builds an App for base (e.g. "http://127.0.0.1:3080").
@@ -54,6 +68,15 @@ func (a *App) AttachUsage(r *usage.Recorder) { a.usage = r }
 // Usage exposes the recorder (nil when not attached).
 func (a *App) Usage() *usage.Recorder { return a.usage }
 
+// background returns the app's lifetime context, or a detached one before
+// Start has run (tests drive the store directly).
+func (a *App) background() context.Context {
+	if a.ctx != nil {
+		return a.ctx
+	}
+	return context.Background()
+}
+
 // Close flushes the usage document (no-op without a recorder).
 func (a *App) Close() {
 	if a.usage != nil {
@@ -75,17 +98,14 @@ func (a *App) usageWorkspaceKey(sid string) string {
 	return ""
 }
 
-// recordUsage folds one event's assistant usage into the persistent
-// statistics (nil-safe: a recorder-less app simply doesn't count).
-func (a *App) recordUsage(sid string, ev *protocol.SessionEvent) {
-	if a.usage == nil || ev == nil || ev.Type != "assistant/message" {
+// recordUsage folds one assistant event's token usage into the persistent
+// statistics; the fold already parsed the payload, so no second decode here
+// (nil-safe: a recorder-less app simply doesn't count).
+func (a *App) recordUsage(sid string, ev *protocol.SessionEvent, usage *protocol.TokenUsage) {
+	if a.usage == nil || ev == nil || usage == nil {
 		return
 	}
-	var d protocol.AssistantMessageEventData
-	if json.Unmarshal(ev.Data, &d) != nil || d.Usage == nil {
-		return
-	}
-	a.usage.Record(sid, a.usageWorkspaceKey(sid), ev.Time, ev.Seq, d.Usage)
+	a.usage.Record(sid, a.usageWorkspaceKey(sid), ev.Time, ev.Seq, usage)
 }
 
 // recordPageUsage folds a history page's assistant usage (the same
@@ -96,13 +116,21 @@ func (a *App) recordPageUsage(id string, events []protocol.HistoryEntry) {
 		return
 	}
 	for i := range events {
-		a.recordUsage(id, &events[i].Event)
+		ev := &events[i].Event
+		if ev.Type != "assistant/message" {
+			continue
+		}
+		var d protocol.AssistantMessageEventData
+		if json.Unmarshal(ev.Data, &d) == nil && d.Usage != nil {
+			a.usage.Record(id, a.usageWorkspaceKey(id), ev.Time, ev.Seq, d.Usage)
+		}
 	}
 }
 
 // Start probes the host until ready, opens the downlinks, baselines the
 // roster and runs the pumps until ctx ends.
 func (a *App) Start(ctx context.Context) *core.Store {
+	a.ctx = ctx
 	a.dl.Start(ctx)
 	go a.pumpFrames(ctx)
 	go a.pumpStatus(ctx)
@@ -179,6 +207,26 @@ func (a *App) refreshRoster(ctx context.Context) {
 	}
 }
 
+// refreshRosterCoalesced is the user-action path (create/rename/fork):
+// at most one fetch in flight and one per 2s. The initial baseline and
+// the re-baselines call refreshRoster directly — they pace themselves.
+func (a *App) refreshRosterCoalesced() {
+	if !a.rosterBusy.CompareAndSwap(false, true) {
+		return
+	}
+	defer a.rosterBusy.Store(false)
+	last := a.rosterLast.Load()
+	now := time.Now()
+	if now.UnixMilli()-last < 2000 {
+		return
+	}
+	a.rosterLast.Store(now.UnixMilli())
+	a.refreshRoster(a.background())
+}
+
+// historyPageSize bounds one history page fetch (tail and older alike).
+const historyPageSize = 120
+
 // LoadActiveTail pulls the tail page of the active session (re-baseline).
 func (a *App) LoadActiveTail(ctx context.Context) {
 	id := a.st.Active()
@@ -190,7 +238,7 @@ func (a *App) LoadActiveTail(ctx context.Context) {
 
 // LoadTail fetches and applies one history tail page.
 func (a *App) LoadTail(ctx context.Context, id string) {
-	resp, err := a.cli.History(ctx, id, 0, 120)
+	resp, err := a.cli.History(ctx, id, 0, historyPageSize)
 	if err != nil {
 		a.st.Notify(core.Notice{Level: "err", Text: id + " history: " + err.Error()})
 		return
@@ -201,7 +249,7 @@ func (a *App) LoadTail(ctx context.Context, id string) {
 
 // LoadOlder fetches the page before the given seq.
 func (a *App) LoadOlder(ctx context.Context, id string, beforeSeq int64) {
-	resp, err := a.cli.History(ctx, id, beforeSeq, 120)
+	resp, err := a.cli.History(ctx, id, beforeSeq, historyPageSize)
 	if err != nil {
 		a.st.Notify(core.Notice{Level: "err", Text: "older history: " + err.Error()})
 		return
@@ -225,6 +273,9 @@ func (a *App) Rebaseline(ctx context.Context) {
 // RebaselineThrottled runs Rebaseline on a background goroutine with two
 // bounds: one in flight (rebBusy) and at most one per 2s (flapping peers
 // emit a reconnect notice per flap; they must not hammer session.list).
+// A drop pulse that loses the interval gate is dropped: its repair rides
+// the next flap's baseline (at most ~2s stale), while the notice still
+// fires, so the user sees the event.
 // Reports whether a re-baseline was scheduled.
 func (a *App) RebaselineThrottled() bool {
 	if !a.rebBusy.CompareAndSwap(false, true) {
@@ -239,7 +290,7 @@ func (a *App) RebaselineThrottled() bool {
 	}
 	go func() {
 		defer a.rebBusy.Store(false)
-		a.Rebaseline(context.Background())
+		a.Rebaseline(a.background())
 	}()
 	return true
 }
@@ -274,7 +325,7 @@ func (a *App) CreateSession(ctx context.Context, req protocol.SessionCreateReque
 	if req.WorkspaceId != "" {
 		a.st.SeedWorkspace(resp.SessionId, req.WorkspaceId)
 	}
-	a.refreshRoster(context.Background())
+	a.refreshRosterCoalesced()
 	return resp.SessionId, nil
 }
 
@@ -422,7 +473,7 @@ func (a *App) Rename(ctx context.Context, id, title string) (string, error) {
 		return "", err
 	}
 	a.st.SetTitle(id, t)
-	a.refreshRoster(context.Background())
+	a.refreshRosterCoalesced()
 	return t, nil
 }
 
@@ -433,7 +484,7 @@ func (a *App) Fork(ctx context.Context, id string, atSeq int64) (string, error) 
 		return "", err
 	}
 	a.st.EnsureRow(nid)
-	a.refreshRoster(context.Background())
+	a.refreshRosterCoalesced()
 	return nid, nil
 }
 
@@ -480,6 +531,16 @@ func (a *App) Subagents(ctx context.Context, parentId string) (*protocol.Subagen
 	return a.cli.Subagents(ctx, parentId)
 }
 
+// SubagentHistory pages a child's event log (newest first).
+func (a *App) SubagentHistory(ctx context.Context, req protocol.SubagentHistoryRequest) (*protocol.HistoryResponse, error) {
+	return a.cli.SubagentHistory(ctx, req)
+}
+
+// SubagentInterrupt interrupts a running continuable child.
+func (a *App) SubagentInterrupt(ctx context.Context, parentSessionId, childSessionId string) error {
+	return a.cli.SubagentInterrupt(ctx, parentSessionId, childSessionId)
+}
+
 // Descriptions lists agent presets.
 func (a *App) Presets(ctx context.Context) (*protocol.AgentPresetListResponse, error) {
 	return a.cli.AgentPresets(ctx)
@@ -513,7 +574,7 @@ func (a *App) pumpStatus(ctx context.Context) {
 				if first {
 					first = false
 				} else {
-					a.st.Notify(core.Notice{Level: "ok", Text: "reconnected; rebaselining"})
+					a.st.Notify(core.Notice{Level: "ok", Text: i18n.LoadDefault().T("reconnect.ok")})
 					a.RebaselineThrottled()
 				}
 			}
@@ -530,7 +591,7 @@ func (a *App) pumpDrops(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-a.dl.Drops():
-			a.st.Notify(core.Notice{Level: "warn", Text: "downlink congested; rebaselining"})
+			a.st.Notify(core.Notice{Level: "warn", Text: i18n.LoadDefault().T("reconnect.congested")})
 			a.RebaselineThrottled()
 		}
 	}
@@ -543,8 +604,9 @@ func (a *App) handleFrame(ctx context.Context, fr client.DownlinkFrame) {
 		if err != nil {
 			return
 		}
-		a.st.Event(ev.SessionId, &ev.Event)
-		a.recordUsage(ev.SessionId, &ev.Event)
+		if _, usage := a.st.Event(ev.SessionId, &ev.Event); usage != nil {
+			a.recordUsage(ev.SessionId, &ev.Event, usage)
+		}
 	case protocol.FMuxSubscribed:
 		v, err := protocol.DecodeMuxSubscribed(fr.Payload)
 		if err == nil {

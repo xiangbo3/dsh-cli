@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -11,6 +14,7 @@ import (
 
 	"dsh-cli/internal/app"
 	"dsh-cli/internal/core"
+	"dsh-cli/internal/protocol"
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -136,7 +140,9 @@ func TestInputCtrlKeysEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	a := app.New("http://127.0.0.1:3080")
+	fh := newFakeHost(t)
+	fh.sessions = []protocol.SessionSummary{{SessionId: "s1"}} // a row to boot: no auto-create mid-keystream
+	a := app.New(fh.URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.splashOff = true // headless key test: no boot animation
@@ -210,7 +216,7 @@ func TestInputRenderCaretAndTransparentSurface(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 
 	m := NewModel(a)
@@ -255,7 +261,7 @@ func TestInputRenderCaretOverChar(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 
 	m := NewModel(a)
@@ -318,7 +324,7 @@ func TestInputBarTransparentSurface(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 
 	m := NewModel(a)
@@ -351,7 +357,7 @@ func TestInputBarSelectionUnderline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 
 	m := NewModel(a)
@@ -489,7 +495,7 @@ func TestUserLinesVoiceColor(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 
 	m := NewModel(a)

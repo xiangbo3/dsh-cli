@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package oneoff is the non-interactive surface: one-shot prompts, pipes,
 // and the inspection commands (status / ls / new / history / models).
 package oneoff
@@ -5,7 +8,6 @@ package oneoff
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -202,15 +204,10 @@ func (o *Opts) Fill() error {
 		return fmt.Errorf("bad server URL %q (from --url, $DSH_URL, or ~/.dsh-cli/config.json): want http:// or https:// host:port", o.URL)
 	}
 	// Plain http:// off-loopback sends prompts (and tool args) in the clear.
-	if u.Scheme == "http" && u.Hostname() != "localhost" && !isLoopbackHost(u.Hostname()) {
+	if config.PlainHTTP(o.URL) {
 		fmt.Fprintf(os.Stderr, "note: %s is plain http (unencrypted; no auth unless DSH_TOKEN is set)\n", u.Host)
 	}
 	return nil
-}
-
-func isLoopbackHost(h string) bool {
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
 }
 
 // streamer prints incremental agent activity (tools, thinking, text) for

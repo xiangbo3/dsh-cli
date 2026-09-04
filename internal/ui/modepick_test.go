@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -31,7 +34,7 @@ func modeRoster() []protocol.AgentPresetEntry {
 // preset the session runs, and stays clean when the deployment recorded
 // none.
 func TestTopBarModeLabel(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)
@@ -57,7 +60,7 @@ func TestTopBarModeLabel(t *testing.T) {
 // shipped modes (over localized file metadata), the default and current
 // marks, user trust, broken rows, and the blank-vs-ran hint.
 func TestModePickerView(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)
@@ -210,7 +213,8 @@ func TestModePickBlankApplies(t *testing.T) {
 // already run keeps its composition, so the pick stages for the next new
 // session instead of failing.
 func TestModePickStagesWhenRan(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080") // dead server: staging must not RPC
+	fh := newFakeHost(t)
+	a := app.New(fh.URL) // private host: an accidental select RPC shows up here
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)
@@ -238,6 +242,11 @@ func TestModePickStagesWhenRan(t *testing.T) {
 	}
 	if m.stagedMode != "" {
 		t.Fatalf("stagedMode = %q after same-pick", m.stagedMode)
+	}
+	// A ran session stages for the next session: neither pick may have
+	// switched it in place.
+	if fh.called(protocol.MAgentPresetSelect) {
+		t.Fatal("ran-session pick must stage, not select")
 	}
 }
 
@@ -453,7 +462,7 @@ func TestModePickerEnterFlow(t *testing.T) {
 // TestAgentPresetSelectedEvent pins the fold of the host's committed-switch
 // event so other clients' picks converge into the store.
 func TestAgentPresetSelectedEvent(t *testing.T) {
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.Start(ctx)

@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package modes is the dsh-cli face of the deployment's mode (agent preset)
 // roster: the four modes a DSH deployment ships (Standard, PTC, Minimal,
 // Creator), their canonical display copy, and the name resolution that

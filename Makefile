@@ -23,7 +23,7 @@ export GOCACHE
 .gocache:
 	mkdir -p $@
 
-.PHONY: all deps build release release-clean test test-race vet check run clean install
+.PHONY: all deps build release release-clean test test-race vet lint check run clean install
 
 all: build
 
@@ -39,6 +39,9 @@ build: .gotmp .gocache
 # release: one versioned artifact per (os, arch) pair into releases/:
 # a .tar.gz (dsh-cli-<ver>-<os>-<arch>.tar.gz, the binary inside is
 # dsh-cli); windows keeps the plain exe (dsh-cli-<ver>-<arch>.exe).
+# The last artifact is a source tarball (dsh-cli-<ver>-src.tar.gz):
+# the working tree minus build state and local dev files (the .gitignore
+# conventions), tar members stripped of the leading ./.
 # <ver> is read from internal/version/version.go — no Makefile sync.
 # CGO stays off: every dependency is pure Go, so no cross toolchain is
 # needed. Matrix:
@@ -72,7 +75,13 @@ release: .gotmp .gocache
 		else \
 			tar -czf "$$out" -C "$$st" "$(BINARY)" || exit 1; \
 		fi; \
-	done
+	done; \
+	echo "release: src -> $(RELEASE_DIR)/$(BINARY)-$(VERSION)-src.tar.gz"; \
+	tar --transform 's|^\./||' -czf "$(RELEASE_DIR)/$(BINARY)-$(VERSION)-src.tar.gz" \
+		--exclude='.git' --exclude='.gocache' --exclude='.gotmp' \
+		--exclude='releases' --exclude='$(RELEASE_DIR)' \
+		--exclude='./$(BINARY)' --exclude='./AGENTS.md' --exclude='./smoke.sh' \
+		--exclude='*.log' . || exit 1
 
 release-clean:
 	rm -rf $(RELEASE_DIR)
@@ -87,6 +96,12 @@ test-race: .gotmp .gocache
 
 vet: .gotmp .gocache
 	go vet ./...
+
+# lint: golangci-lint under the project's minimal config. The binary is
+# optional (check stays vet+test+build) — install with:
+# go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+lint: .gotmp .gocache
+	golangci-lint run ./...
 
 check: vet test-race build
 

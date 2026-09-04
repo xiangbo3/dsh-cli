@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // TestInputCurInvariantStress replays realistic multi-line editing
 // sessions (shift+enter newlines, mouse press/drag, caret walks,
 // pastes, slash menu, history) plus a key fuzz, asserting the caret
@@ -177,7 +180,7 @@ func TestInputCurInvariantStress(t *testing.T) {
 func TestHistBrowsePickDesync(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.W, m.H = 120, 40

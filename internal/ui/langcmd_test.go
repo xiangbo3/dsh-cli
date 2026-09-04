@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -22,7 +25,7 @@ func langTestEnv(t *testing.T) (string, string) {
 	dir := t.TempDir()
 	cfgDir := t.TempDir()
 	t.Setenv("DSH_LOCALES", dir)
-	t.Setenv("HOME", t.TempDir()) // isolate the locale storage dir
+	t.Setenv("HOME", t.TempDir())    // isolate the locale storage dir
 	t.Setenv("DSH_CLI_HOME", cfgDir) // no inherited startup preference
 	t.Setenv("LC_ALL", "")
 	t.Setenv("LC_MESSAGES", "")
@@ -205,8 +208,23 @@ func TestLanguageBootDetection(t *testing.T) {
 	if m.loc.Lang != "zh" {
 		t.Fatalf("boot locale = %q, want zh from the environment", m.loc.Lang)
 	}
-	if len(m.toasts) == 0 || !strings.Contains(m.toasts[len(m.toasts)-1].text, "中文") {
-		t.Errorf("boot toast = %v, want the Chinese language note", m.toasts)
+	// The boot reports the language; the deliberately stale 5-key zh
+	// fixture also earns the locale-lag note (its missing keys fall back
+	// to English, so the face reads mixed).
+	var langNote, lagNote bool
+	for _, tt := range m.toasts {
+		if strings.Contains(tt.text, "中文") {
+			langNote = true
+		}
+		if strings.Contains(tt.text, "zh.json") {
+			lagNote = true
+		}
+	}
+	if !langNote {
+		t.Errorf("boot toasts = %v, want the Chinese language note", m.toasts)
+	}
+	if !lagNote {
+		t.Errorf("boot toasts = %v, want the locale-lag note for the stale fixture", m.toasts)
 	}
 	// A language with no catalog file falls back to English.
 	t.Setenv("DSH_LOCALES", filepath.Join(dir, "empty"))

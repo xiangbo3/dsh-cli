@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package ui tests: parked answerable frames (question / approval) must
 // be surfaced — the web client keeps them in the conversation until
 // answered, and the TUI's equivalent is the auto-opened answer modal.
@@ -5,6 +8,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -23,7 +27,7 @@ import (
 func TestQuestionAutoOpenParkedReopen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.W, m.H = 120, 40
@@ -95,7 +99,7 @@ func TestQuestionAutoOpenParkedReopen(t *testing.T) {
 func TestApprovalAutoOpen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(newFakeHost(t).URL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.W, m.H = 120, 40
@@ -117,9 +121,86 @@ func TestApprovalAutoOpen(t *testing.T) {
 		t.Fatalf("modal bound to approval %q (want app-1)", am.pen.ApprovalId)
 	}
 
-	// ctrl+a = allow once: the modal closes and the respond is dispatched.
+	// A bash-family tool takes a second confirming allow: the first
+	// ctrl+a arms (the modal stays open), the second answers and closes.
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	if got := len(m.mods); got != 1 {
+		t.Fatalf("after first ctrl+a: modals = %d (want 1, armed)", got)
+	}
+	if !m.topModal().(*approvalModal).armed {
+		t.Fatalf("first ctrl+a did not arm the bash approval")
+	}
+	// A reject-family key while armed backs out instead of rejecting.
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.topModal().(*approvalModal).armed {
+		t.Fatalf("esc while armed did not disarm")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	if got := len(m.mods); got != 0 {
-		t.Fatalf("after ctrl+a: modals = %d (want 0, answered)", got)
+		t.Fatalf("after confirming ctrl+a: modals = %d (want 0, answered)", got)
+	}
+}
+
+// TestFlashTurnEndsNonActive pins the nil-map regression (the first
+// dirty pulse with turn-end rows must not panic on the unseen-seq
+// record) and the flash rule: first sight is silent, a newer turn-end
+// on a non-active session flashes its roster row.
+func TestFlashTurnEndsNonActive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	a := app.New(newFakeHost(t).URL)
+	a.Start(ctx)
+	m := NewModel(a)
+	m.W, m.H = 120, 40
+
+	st := a.Store()
+	st.SetSessions([]protocol.SessionSummary{
+		{SessionId: "s1", Cwd: "/tmp"},
+		{SessionId: "s2", Cwd: "/tmp"},
+	})
+	st.SetActive("s1")
+	mkEnd := func(seq, turn int) *protocol.SessionEvent {
+		b, _ := json.Marshal(protocol.TurnEndEventData{Turn: turn, Reason: protocol.TurnEndReason{Kind: "completed"}})
+		ev := protocol.SessionEvent{Type: "turn/end", Seq: int64(seq), Time: int64(seq) * 1000, Data: b}
+		return &ev
+	}
+	st.Event("s2", mkEnd(3, 1))
+
+	m.Update(dirtyMsg{}) // first sight: must not panic (nil maps)
+	if _, ok := m.flashEnds["s2"]; ok {
+		t.Fatalf("first sight flashed (want the silent record)")
+	}
+
+	st.Event("s2", mkEnd(7, 2))
+	m.Update(dirtyMsg{})
+	if until := m.flashEnds["s2"]; time.Until(until) <= 0 {
+		t.Fatalf("a newer turn-end on the non-active session must flash its row")
+	}
+}
+
+// TestApprovalNonShellSingleKey pins the non-bash path: a file-tool
+// approval answers on the first allow key (no confirming second key).
+func TestApprovalNonShellSingleKey(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	a := app.New(newFakeHost(t).URL)
+	a.Start(ctx)
+	m := NewModel(a)
+	m.W, m.H = 120, 40
+
+	st := a.Store()
+	st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp"}})
+	st.SetActive("s1")
+	args := "{\"file_path\":\"/tmp/x\"}"
+	st.ApprovalRequested("s1", "rpc-3", "app-2", "read", "call-2", "needs read access", args)
+
+	m.Update(dirtyMsg{})
+	if got := len(m.mods); got != 1 {
+		t.Fatalf("after dirty pulse: modals = %d (want 1)", got)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	if got := len(m.mods); got != 0 {
+		t.Fatalf("after ctrl+a: modals = %d (want 0, answered on the first key)", got)
 	}
 }

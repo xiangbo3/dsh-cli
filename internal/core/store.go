@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package core
 
 import (
@@ -188,7 +191,7 @@ func (s *Store) pushNotice(n Notice) {
 	// Host-shaped text (errors, reasons) arrives here from JSON: strip
 	// control runes once at the ingress so no toast path can inject ANSI/VT
 	// into the terminal.
-	n.Text = textutil.StripControl(n.Text)
+	n.Text = textutil.StripControl(textutil.StripANSI(n.Text))
 	select {
 	case s.notices <- n:
 	default:
@@ -397,7 +400,7 @@ func decodeTitle(v json.RawMessage) string {
 	if json.Unmarshal(v, &t) != nil {
 		return ""
 	}
-	return t
+	return textutil.StripANSI(t)
 }
 
 // CtxModel is the transcript-header and top-bar read: the session's
@@ -501,12 +504,15 @@ func (s *Store) LoadOlder(id string, resp *protocol.HistoryResponse) {
 	s.mu.Unlock()
 }
 
-// Event applies one live session event. It returns whether it changed state.
-func (s *Store) Event(id string, ev *protocol.SessionEvent) bool {
+// Event applies one live session event. It returns whether it changed
+// state and, for assistant/message events, the parsed token usage (the
+// fold already decoded the payload; the usage recorder must not decode
+// it again).
+func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.TokenUsage) {
 	s.mu.Lock()
 	st := s.Sess(id)
 	before := len(st.T.Items)
-	changed := st.T.Apply(ev)
+	changed, usage := st.T.Apply(ev)
 	switch ev.Type {
 	case "turn/start":
 		st.Running = true
@@ -546,17 +552,21 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) bool {
 	case "todo/write":
 		var d protocol.TodoWriteEventData
 		if json.Unmarshal(ev.Data, &d) == nil {
+			for i := range d.Todos {
+				d.Todos[i].Content = textutil.StripANSI(d.Todos[i].Content)
+			}
 			st.Todos = d.Todos
 		}
 	case "session/title":
 		var d protocol.TitleEventData
 		if json.Unmarshal(ev.Data, &d) == nil && d.Title != "" {
-			st.title = d.Title
+			st.title = textutil.StripANSI(d.Title)
 		}
 	case "goal/change":
 		var d protocol.GoalChangeData
 		if json.Unmarshal(ev.Data, &d) == nil {
 			if d.Goal != nil {
+				d.Goal.Objective = textutil.StripANSI(d.Goal.Objective)
 				st.Goal = &protocol.GoalProjected{Goal: d.Goal, RoundsStarted: d.RoundsStarted}
 			} else {
 				st.Goal = nil
@@ -587,7 +597,7 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) bool {
 		s.pushDirty()
 	}
 	s.mu.Unlock()
-	return changed || before != len(st.T.Items)
+	return changed || before != len(st.T.Items), usage
 }
 
 // UserMessageReconcile replaces the optimistic echo for a prompt rpcId.
@@ -629,6 +639,12 @@ func (s *Store) PromptCommand(id, rpcId string, res *protocol.PromptResponse) {
 func (s *Store) MuxQueue(id string, items []protocol.QueuedInboxItem) {
 	s.mu.Lock()
 	st := s.Sess(id)
+	for i := range items {
+		for j := range items[i].Message.Content {
+			items[i].Message.Content[j].Text = textutil.StripANSI(items[i].Message.Content[j].Text)
+			items[i].Message.Content[j].Name = textutil.StripANSI(items[i].Message.Content[j].Name)
+		}
+	}
 	st.Queue = items
 	st.Running = true // pending work implies an active queue
 	s.pushDirty()
@@ -639,6 +655,10 @@ func (s *Store) MuxQueue(id string, items []protocol.QueuedInboxItem) {
 func (s *Store) MuxJobs(id string, jobs []protocol.JobView) {
 	s.mu.Lock()
 	st := s.Sess(id)
+	for i := range jobs {
+		jobs[i].Label = textutil.StripANSI(jobs[i].Label)
+		jobs[i].Detail = textutil.StripANSI(jobs[i].Detail)
+	}
 	st.Jobs = jobs
 	s.pushDirty()
 	s.mu.Unlock()
@@ -763,6 +783,7 @@ func (s *Store) SetWorkspaces(items []protocol.WorkspaceView, archived []string)
 		if w.WorkspaceId == "" {
 			continue
 		}
+		w.Title = textutil.StripANSI(w.Title)
 		s.workspaces[w.WorkspaceId] = &w
 		s.wsOrder = append(s.wsOrder, w.WorkspaceId)
 	}
@@ -821,6 +842,7 @@ func (s *Store) workspaceUpsertLocked(v *protocol.WorkspaceView) {
 	if v.WorkspaceId == "" {
 		return
 	}
+	v.Title = textutil.StripANSI(v.Title)
 	if _, ok := s.workspaces[v.WorkspaceId]; !ok {
 		s.wsOrder = append(s.wsOrder, v.WorkspaceId)
 	}
@@ -988,7 +1010,7 @@ func (s *Store) CacheRoster(rows []CacheRow) bool {
 		// anything live — a title event or a re-baselined projection — is
 		// newer than the previous boot by definition and must win.
 		if r.Title != "" {
-			st.title = r.Title
+			st.title = textutil.StripANSI(r.Title)
 		}
 	}
 	s.rosterCashed = true
@@ -1010,6 +1032,7 @@ func (s *Store) CacheWorkspaces(items []protocol.WorkspaceView, archived []strin
 		if w.WorkspaceId == "" {
 			continue
 		}
+		w.Title = textutil.StripANSI(w.Title)
 		s.workspaces[w.WorkspaceId] = &w
 		s.wsOrder = append(s.wsOrder, w.WorkspaceId)
 	}
@@ -1190,7 +1213,7 @@ func samePath(a, b string) bool {
 func (s *Store) ApprovalRequested(id, rpcId, approvalId, toolName, callId, reason, args string) {
 	s.mu.Lock()
 	st := s.Sess(id)
-	st.approvals[rpcId] = &ApprovalPend{RpcId: rpcId, SessionId: id, ApprovalId: approvalId, ToolName: toolName, CallId: callId, Reason: reason, Args: args}
+	st.approvals[rpcId] = &ApprovalPend{RpcId: rpcId, SessionId: id, ApprovalId: approvalId, ToolName: textutil.StripANSI(toolName), CallId: callId, Reason: textutil.StripANSI(reason), Args: args}
 	s.pushDirty()
 	s.mu.Unlock()
 }
@@ -1215,6 +1238,15 @@ func (s *Store) ApprovalResolved(approvalId, outcome string) {
 func (s *Store) QuestionRequested(id, rpcId string, qs []protocol.QuestionItem) {
 	s.mu.Lock()
 	st := s.Sess(id)
+	for i := range qs {
+		qs[i].Question = textutil.StripANSI(qs[i].Question)
+		qs[i].Detail = textutil.StripANSI(qs[i].Detail)
+		qs[i].Header = textutil.StripANSI(qs[i].Header)
+		for j := range qs[i].Options {
+			qs[i].Options[j].Label = textutil.StripANSI(qs[i].Options[j].Label)
+			qs[i].Options[j].Description = textutil.StripANSI(qs[i].Options[j].Description)
+		}
+	}
 	st.questions[rpcId] = &QuestionPend{RpcId: rpcId, SessionId: id, Questions: qs}
 	s.pushDirty()
 	s.mu.Unlock()
@@ -1657,6 +1689,7 @@ func decodeGoal(v json.RawMessage) *protocol.GoalProjected {
 	if err := json.Unmarshal(v, &g); err != nil || g.Goal == nil {
 		return nil
 	}
+	g.Goal.Objective = textutil.StripANSI(g.Goal.Objective)
 	return &g
 }
 

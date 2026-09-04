@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package protocol
 
 import "encoding/json"
@@ -209,13 +212,26 @@ type QueueUpdateRequest struct {
 }
 
 // SubagentListEntry is one direct child in the subagent.list catalog.
+// SubagentListEntry is one row of the subagent.list value: a child
+// (one-shot or continuable, with an activity state) or a diagnostic
+// placeholder for a row the host could not read.
 type SubagentListEntry struct {
-	SessionId string `json:"sessionId"`
-	Title     string `json:"title,omitempty"`
-	Running   bool   `json:"running,omitempty"`
-	Blank     bool   `json:"blank,omitempty"`
-	Origin    string `json:"origin,omitempty"`
-	ParentId  string `json:"parentSessionId,omitempty"`
+	Kind        string `json:"kind"` // "child" | "diagnostic"
+	Id          string `json:"id"`
+	Mode        string `json:"mode,omitempty"`     // child: "one-shot" | "continuable"
+	Activity    string `json:"activity,omitempty"` // child: "running" | "inactive"
+	HasChildren bool   `json:"hasChildren,omitempty"`
+	Label       string `json:"label,omitempty"`  // child display name
+	Reason      string `json:"reason,omitempty"` // diagnostic: "corrupt" | "unsupported" | "unavailable"
+}
+
+// SubagentHistoryRequest is the subagent.history payload.
+type SubagentHistoryRequest struct {
+	ParentSessionId string `json:"parentSessionId"`
+	ChildSessionId  string `json:"childSessionId"`
+	Mode            string `json:"mode"` // "one-shot" | "continuable"
+	BeforeSeq       *int64 `json:"beforeSeq,omitempty"`
+	MaxMessages     int    `json:"maxMessages,omitempty"`
 }
 
 // SubagentCatalog is the subagent.list value.

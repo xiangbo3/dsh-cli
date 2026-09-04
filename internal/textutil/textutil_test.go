@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package textutil
 
 import (
@@ -57,5 +60,37 @@ func TestHumanDuration(t *testing.T) {
 		if got := HumanDuration(c.in); got != c.want {
 			t.Errorf("%s: HumanDuration(%s) = %q, want %q", c.name, c.in, got, c.want)
 		}
+	}
+}
+
+func TestStripANSI(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "no escapes here", "no escapes here"},
+		{"csi", "a\x1b[31mred\x1b[0m b", "ared b"},
+		{"csi-param", "a\x1b[1;32;44mgreen\x1b[0m", "agreen"},
+		{"csi-question", "a\x1b[?25lhidden\x1b[?25h b", "ahidden b"},
+		{"osc-bel", "a\x1b]0;evil title\x07kept", "akept"},
+		{"osc-st", "a\x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\ b", "alink b"},
+		{"dcs", "a\x1bPq\x1b\\b", "ab"},
+		{"esc-pair", "a\x1b[Ab", "ab"},
+		{"trailing-esc", "ab\x1b", "ab"},
+		{"unterminated-osc", "a\x1b]0;never closed", "a"},
+		{"nested-ansi", "\x1b[31m\x1b[32mx\x1b[0m", "x"},
+		{"keep-text", "\x1b[1mbold\x1b[0m plain", "bold plain"},
+		{"cjk", "\x1b]7;file=//host/world\x07世界", "世界"},
+	}
+	for _, c := range cases {
+		if got := StripANSI(c.in); got != c.want {
+			t.Errorf("%s: StripANSI(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+	// fast path: no ESC byte means the text comes back unchanged
+	s := "plain text"
+	if got := StripANSI(s); got != s {
+		t.Error("fast path changed the text")
 	}
 }

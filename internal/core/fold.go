@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // Package core is the state engine between the wire and the UI: a pure
 // event-log fold that turns the DSH session log (history replay and live
 // frames alike) into transcript items, plus a per-session store that keeps
@@ -36,6 +39,7 @@ type ToolBlock struct {
 	Done       bool
 	CallSeq    int64
 	CallTime   int64
+	DoneTime   int64 // 0 until the result lands (or the turn-end sweep)
 }
 
 // ABlock is one assistant content block in display order.
@@ -189,25 +193,25 @@ func dropPendingEchoText(t *Transcript, text string) bool {
 
 // Apply absorbs one session event in order. It returns whether the fold
 // changed. Out-of-order events (seq <= maxSeq) are dropped.
-func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
+func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsage) {
 	if ev.Seq > 0 && ev.Seq <= t.maxSeq {
-		return false
+		return false, nil
 	}
 	switch ev.Type {
 	case "turn/start":
 		var d protocol.TurnStartEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		t.TurnActive = true
 		t.TurnStartAt = ev.Time
 		t.TurnStartNum = d.Turn
 		t.TurnTokens = TurnTokens{}
-		return true
+		return true, nil
 	case "turn/end":
 		var d protocol.TurnEndEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		t.attrTurn(d.Turn)
 		t.finalizeStreaming()
@@ -226,17 +230,18 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 		t.TurnActive = false
 		for _, tb := range t.openTools {
 			tb.Done = true // an open tool call at turn end got no result
+			tb.DoneTime = ev.Time
 		}
 		t.openTools = map[string]*ToolBlock{}
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	case "step/start", "step/end":
 		t.noteSeq(ev.Seq, ev.Time)
-		return false // step boundaries stay invisible; the spinner tracks them
+		return false, nil // step boundaries stay invisible; the spinner tracks them
 	case "user/message":
 		var m protocol.Message
 		if err := json.Unmarshal(ev.Data, &m); err != nil {
-			return false
+			return false, nil
 		}
 		if m.Source.RpcId != "" {
 			t.ReconcileEcho(m.Source.RpcId)
@@ -246,15 +251,15 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 			// out of the transcript but advance the seq watermark so replay
 			// and out-of-order drops behave the same.
 			t.noteSeq(ev.Seq, ev.Time)
-			return true
+			return true, nil
 		}
 		dropPendingEchoText(t, protocol.SessionTextMessage(&m))
 		t.AddUser(&m, ev.Time, ev.Seq)
-		return true
+		return true, nil
 	case "assistant/message":
 		var d protocol.AssistantMessageEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		t.finalizeStreaming()
 		t.attrTurn(d.Turn)
@@ -265,11 +270,11 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 			t.Items = append(t.Items, it)
 		}
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, d.Usage
 	case "assistant/chunk":
 		var d protocol.ChunkEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		t.attrTurn(d.Turn)
 		if !t.beginStreaming(d.Turn, d.Step) {
@@ -278,21 +283,21 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 		}
 		t.applyChunk(d.Chunk, ev.Time)
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	case "tool/call":
 		var d protocol.ToolCallEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		t.attrTurn(d.Turn)
-		tb := &ToolBlock{Id: d.CallId, Name: d.Name, Args: d.Arguments, ArgsFull: d.Arguments, CallSeq: ev.Seq, CallTime: ev.Time}
+		tb := &ToolBlock{Id: d.CallId, Name: textutil.StripANSI(d.Name), Args: d.Arguments, ArgsFull: d.Arguments, CallSeq: ev.Seq, CallTime: ev.Time}
 		t.ensureToolBlock(tb)
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	case "tool/result":
 		var d protocol.ToolResultEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		t.attrTurn(d.Turn)
 		matched := false
@@ -304,6 +309,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 				tb.ResultText = protocol.ToolResultText(b.Content)
 				tb.IsError = b.IsError || d.Error != nil
 				tb.Done = true
+				tb.DoneTime = ev.Time
 				matched = true
 				t.bumpToolItems(tb)
 				delete(t.openTools, b.ToolCallId)
@@ -317,28 +323,28 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 			t.Items = append(t.Items, t.stamp(&Item{Kind: KindNote, Seq: ev.Seq, Time: ev.Time, Note: "tool result " + text}))
 		}
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	case "todo/write":
 		var d protocol.TodoWriteEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		t.noteSeq(ev.Seq, ev.Time)
-		return len(d.Todos) > 0 // side state; no transcript row
+		return len(d.Todos) > 0, nil // side state; no transcript row
 	case "session/title":
 		t.noteSeq(ev.Seq, ev.Time)
-		return false // side state (title)
+		return false, nil // side state (title)
 	case "command/run":
 		var d protocol.CommandRunData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		t.Items = append(t.Items, t.stamp(&Item{Kind: KindCommand, Seq: ev.Seq, Time: ev.Time, CmdRun: &d}))
-		return true
+		return true, nil
 	case "command/done":
 		var d protocol.CommandDoneData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			return false
+			return false, nil
 		}
 		for i := len(t.Items) - 1; i >= 0; i-- {
 			if t.Items[i].Kind == KindCommand && t.Items[i].CmdRun != nil && t.Items[i].CmdDone == nil && t.Items[i].CmdRun.CommandId == d.CommandId {
@@ -347,13 +353,13 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 				cp.Ver++
 				t.replaceItem(i, &cp)
 				t.noteSeq(ev.Seq, ev.Time)
-				return true
+				return true, nil
 			}
 		}
 		// no matching run in view: render standalone
 		t.Items = append(t.Items, t.stamp(&Item{Kind: KindCommand, Seq: ev.Seq, Time: ev.Time, CmdDone: &d}))
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	case "compaction/start", "compaction/end", "compaction/summary", "compaction/prune":
 		var d struct {
 			Summary string `json:"summary,omitempty"`
@@ -365,7 +371,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 		}
 		t.Items = append(t.Items, t.stamp(&Item{Kind: KindNote, Seq: ev.Seq, Time: ev.Time, Note: label}))
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	case "llm/retry", "llm/retry-started":
 		var d protocol.LlmRetryData
 		_ = json.Unmarshal(ev.Data, &d)
@@ -375,7 +381,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 		}
 		t.Items = append(t.Items, t.stamp(&Item{Kind: KindNote, Seq: ev.Seq, Time: ev.Time, Note: note}))
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	case "plan/mode", "sandbox/mode", "permission/preset", "agent-preset/selected",
 		"request/header", "request/context", "session/end-seed", "session/title-llm-request",
 		"agent/inbox/spliced", "hook/invoked", "hook/result", "schedule/change",
@@ -385,7 +391,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 		"goal/change", "web/deepseek-search-llm-request":
 		// Side-state or metadata events: no transcript row of their own.
 		t.noteSeq(ev.Seq, ev.Time)
-		return false
+		return false, nil
 	case "tool-workflow/run-start", "tool-workflow/run-end",
 		"tool-workflow/agent-start", "tool-workflow/agent-end":
 		var d struct {
@@ -399,7 +405,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 		}
 		t.Items = append(t.Items, t.stamp(&Item{Kind: KindNote, Seq: ev.Seq, Time: ev.Time, Note: note}))
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	default:
 		raw := strings.TrimSpace(string(ev.Data))
 		if len(raw) > 160 {
@@ -407,7 +413,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) bool {
 		}
 		t.Items = append(t.Items, t.stamp(&Item{Kind: KindUnknown, Seq: ev.Seq, Time: ev.Time, Note: ev.Type, Raw: raw, Ignorable: ev.Ignorable}))
 		t.noteSeq(ev.Seq, ev.Time)
-		return true
+		return true, nil
 	}
 }
 
@@ -423,7 +429,7 @@ func (t *Transcript) Prepend(events []*protocol.SessionEvent) {
 		if ev.Seq > t.maxSeq {
 			continue
 		}
-		_ = scratch.Apply(ev)
+		scratch.Apply(ev)
 	}
 	for _, tb := range scratch.openTools {
 		if _, ok := t.openTools[tb.Id]; !ok {
@@ -546,7 +552,7 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 					b.Kind = "reasoning"
 				case "tool-call":
 					b.Kind = "tool"
-					b.Tool = &ToolBlock{Id: c.Block.Id, Name: c.Block.Name, ArgsFull: c.Block.Arguments, Args: c.Block.Arguments, CallTime: time}
+					b.Tool = &ToolBlock{Id: c.Block.Id, Name: textutil.StripANSI(c.Block.Name), ArgsFull: c.Block.Arguments, Args: c.Block.Arguments, CallTime: time}
 				default:
 					b.Kind = "text"
 				}
@@ -569,7 +575,7 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 			b.Tool.Id = c.Id
 		}
 		if c.Name != "" {
-			b.Tool.Name = c.Name
+			b.Tool.Name = textutil.StripANSI(c.Name)
 		}
 		b.Tool.Args += c.ArgumentsDelta
 		b.Tool.ArgsFull += c.ArgumentsDelta
@@ -581,7 +587,7 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 					b.Kind = "reasoning"
 				case "tool-call":
 					b.Kind = "tool"
-					b.Tool = &ToolBlock{Id: c.Block.Id, Name: c.Block.Name, ArgsFull: c.Block.Arguments, Args: c.Block.Arguments, CallTime: time}
+					b.Tool = &ToolBlock{Id: c.Block.Id, Name: textutil.StripANSI(c.Block.Name), ArgsFull: c.Block.Arguments, Args: c.Block.Arguments, CallTime: time}
 				}
 			}
 		}
@@ -686,7 +692,7 @@ func (t *Transcript) buildAssistantItem(m *protocol.Message, usage *protocol.Tok
 		case "reasoning":
 			it.Blocks = append(it.Blocks, ABlock{Kind: "reasoning", Text: b.Text})
 		case "tool-call":
-			tb := &ToolBlock{Id: b.Id, Name: b.Name, Args: truncateMiddle(b.Arguments, 120), ArgsFull: b.Arguments, CallSeq: seq, CallTime: time}
+			tb := &ToolBlock{Id: b.Id, Name: textutil.StripANSI(b.Name), Args: truncateMiddle(b.Arguments, 120), ArgsFull: b.Arguments, CallSeq: seq, CallTime: time}
 			t.ensureToolBlock(tb)
 			ref := tb
 			if tb.Id != "" {

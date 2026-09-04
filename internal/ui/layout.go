@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 package ui
 
 import (
@@ -7,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"dsh-cli/internal/config"
 	"dsh-cli/internal/core"
 	"dsh-cli/internal/modes"
 	"dsh-cli/internal/protocol"
@@ -36,6 +40,7 @@ func (m *Model) verbs() []string {
 // window popup when it is open, and a second rule above the input deck
 // (queue, slash menu, input, status).
 func (m *Model) View() string {
+	m.updateTermTitle()
 	// The boot splash owns the whole screen until it is dismissed by time
 	// or by a keypress.
 	if m.splashActive() && m.W > 0 && m.H > 0 {
@@ -55,6 +60,9 @@ func (m *Model) View() string {
 
 	// Build bottom-up to measure the main area.
 	menuLines := m.menuView(m.W)
+	if menuLines == nil {
+		menuLines = m.atMenuView(m.W)
+	}
 	inputLines := m.frameInput(m.W, m.inp.render(m, m.W-2))
 	queue := m.queueStrip(m.W)
 	status := m.statusBar(m.W)
@@ -212,17 +220,32 @@ func (m *Model) topBar(w int) string {
 			}
 		}
 	}
-	left := th.Accent().Render(th.Glyph.Zap) + " " + th.Plain().Render(title)
-	if mode != "" {
-		left += " " + th.Subtle().Render("· "+mode)
+	nameVer := th.Faint().Render("dsh-cli " + version.Version)
+	compose := func(t string) string {
+		l := th.Accent().Render(th.Glyph.Zap) + " " + th.Plain().Render(t)
+		if mode != "" {
+			l += " " + th.Subtle().Render("· "+mode)
+		}
+		if model != "" {
+			l += " " + th.Faint().Render("· ") + model
+		}
+		return l
 	}
-	if model != "" {
-		left += " " + th.Faint().Render("· ") + model
+	left := compose(title)
+	// The name/version must stay on screen at any width: in narrow
+	// windows the unbounded title takes the truncation budget first,
+	// then the styled left side as a whole (mode/model are bounded but
+	// can still overflow sub-30-column bars).
+	if budget := w - plainWidth(nameVer) - 1; plainWidth(left) > budget {
+		chrome := plainWidth(left) - runewidth.StringWidth(title)
+		left = compose(truncDisplay(title, budget-chrome))
+		if plainWidth(left) > budget {
+			left = truncDisplay(left, budget)
+		}
 	}
 	// Right edge: the client name and version lead, then the running-state
 	// readout — the strip identifies the program even before a session
 	// lands, and the state icon keeps its own color after the plain readout.
-	nameVer := th.Faint().Render("dsh-cli " + version.Version)
 	// Compose with a hard width budget (visible width: the left side
 	// carries ANSI, which a raw byte count would inflate). The name/version
 	// always fits; the state readout absorbs the clipping (shrinks first,
@@ -834,7 +857,12 @@ func (m *Model) sideView(w, h int) string {
 			default:
 				row := indent + space(2)
 				row += dotStyle.Render(dot)
-				row += space(1) + th.Subtle().Render(title)
+				titleStyle := th.Subtle()
+				if until, ok := m.flashEnds[sr.Id]; ok && time.Now().Before(until) {
+					// A turn just ended on this session: flash the row once.
+					titleStyle = th.Accent()
+				}
+				row += space(1) + titleStyle.Render(title)
 				if mode := modes.Short(sr.Mode); mode != "" {
 					row += space(1) + th.Faint().Render("· "+mode)
 				}
@@ -909,6 +937,10 @@ func (m *Model) syncTrans() bool {
 	m.lastTransWidth = tw
 	snap := m.st.Get(id)
 	if snap != nil {
+		if m.transFor != id {
+			m.followBase = 0 // mirror swapped: line counts no longer comparable
+			m.transFor = id
+		}
 		m.trans.apply(m, snap.Items)
 	}
 	return snap != nil
@@ -955,6 +987,7 @@ func (m *Model) transcriptView(w, h int) string {
 			// Sitting on the last line: re-arm follow so streaming
 			// content keeps the tail pinned (chat-app rule).
 			m.follow = true
+			m.followBase = 0
 		}
 		end := off + h
 		if end > total {
@@ -1024,6 +1057,43 @@ func (m *Model) menuView(w int) []string {
 	return lines
 }
 
+// atMenuView renders the @ completion popup above the input: running
+// children first, then cwd paths, the selected entry accented.
+func (m *Model) atMenuView(w int) []string {
+	in := m.inp
+	if !in.atOpen || len(in.atMenu) == 0 {
+		return nil
+	}
+	th := m.th
+	maxRows := 8
+	n := len(in.atMenu)
+	if n > maxRows {
+		n = maxRows
+	}
+	var lines []string
+	for i := in.atMenuStart(n); i < in.atMenuStart(n)+n; i++ {
+		c := in.atMenu[i]
+		cursor := "  "
+		nameStyle := th.Subtle
+		if i == in.atCur {
+			cursor = th.Accent().Render(th.Glyph.Caret + " ")
+			nameStyle = th.Plain
+		}
+		name := "@" + c.Text
+		suffix := c.Info
+		if c.Kind == "child" && suffix == "" {
+			suffix = m.loc.T("at.child")
+		}
+		line := cursor + nameStyle().Render(name)
+		if suffix != "" {
+			line += th.Faint().Render("  " + suffix)
+		}
+		lines = append(lines, truncDisplay(line, w-2))
+	}
+	lines = append(lines, th.Faint().Render(m.loc.T("menu.footer", in.atCur+1, len(in.atMenu))))
+	return lines
+}
+
 // queueStrip renders the pending lines above the input (LED + dim text):
 // the queued inbox, and any parked answerable frame (a question batch or
 // a tool approval) the user can still open with ctrl+i.
@@ -1063,6 +1133,36 @@ func (m *Model) queueStrip(w int) []string {
 // them), the permission chip (the session's current preset) sits left of
 // the hints, colored by risk; the live connection and the session's token
 // totals close the line.
+// updateTermTitle refreshes the xterm title (OSC 0) on state or identity
+// changes — multi-pane setups read the title, not the transcript.
+func (m *Model) updateTermTitle() {
+	mark, name := "✓", "dsh-cli"
+	if id := m.activeID(); id != "" {
+		if snap := m.st.Get(id); snap != nil {
+			if snap.Title != "" {
+				name = snap.Title
+			}
+			if len(snap.Questions) > 0 || len(snap.Approvals) > 0 {
+				mark = "?"
+			}
+		}
+	}
+	if m.running() {
+		mark = "●"
+	}
+	t := mark + " " + textutil.StripANSI(name)
+	if t == m.termTitle {
+		return
+	}
+	m.termTitle = t
+	if !probeLive() {
+		return
+	}
+	// OSC 0 (ST = ESC \\) — written straight to the tty, the same lane
+	// the theme probe uses; the diffing renderer never sees it.
+	_, _ = probeOutput().WriteString("\x1b]0;" + t + "\x1b\\")
+}
+
 func (m *Model) statusBar(w int) string {
 	th := m.th
 	ws, wsPlain := "", ""
@@ -1077,9 +1177,28 @@ func (m *Model) statusBar(w int) string {
 	if m.running() {
 		hints = m.loc.T("status.hints.running")
 	}
+	if !m.follow && m.followBase > 0 {
+		// Scrolled up while the tail grows: count the lines landed since
+		// follow disarmed (end / pgdn jump back and re-arm).
+		if n := m.trans.total() - m.followBase; n > 0 {
+			hints = strings.TrimRight(hints, " ") + "  " + m.loc.T("status.newlines", fmt.Sprintf("%d", n))
+		}
+	}
+	if m.dockVisible {
+		hints = m.loc.T("status.hints.dock")
+	}
+	if m.sideVisible {
+		hints = m.loc.T("status.hints.side")
+	}
+	// A plain-http remote (http:// off-loopback) sends prompts and tool
+	// args in the clear: the marker stays on the connection readout for
+	// the whole session — the one-shot pre-alt-screen note is long gone
+	// by the time the user is in the UI.
 	conn := th.Ok().Render(th.Glyph.Connected + " " + m.loc.T("status.live"))
 	if !m.st.Connected() {
 		conn = th.Warn().Render(th.Glyph.Reconnect + " " + m.loc.T("status.reconnect"))
+	} else if config.PlainHTTP(m.st.BaseURL()) {
+		conn = th.Warn().Render(th.Glyph.Connected + " " + m.loc.T("status.plainhttp"))
 	}
 	perm, permPlain := "", ""
 	if id := m.activeID(); id != "" {
@@ -1167,11 +1286,14 @@ func (m *Model) modelReadout() (styled, plain string) {
 
 // ---- dock ----------------------------------------------------------------------
 
+// Tab order = display order on the dock bar; the 1..5 jump keys
+// address the tabs in this order.
 const (
 	dockTodos = iota
 	dockJobs
-	dockGoal
+	dockSubs
 	dockQueue
+	dockGoal
 )
 
 // dockView renders the right-hand dock: flat small-caps tabs (the active
@@ -1185,7 +1307,8 @@ func (m *Model) dockView(w, h int) string {
 	}
 	tabNames := []string{
 		m.loc.T("dock.tab.todos"), m.loc.T("dock.tab.jobs"),
-		m.loc.T("dock.tab.goal"), m.loc.T("dock.tab.queue"),
+		m.loc.T("dock.tab.subs"), m.loc.T("dock.tab.queue"),
+		m.loc.T("dock.tab.goal"),
 	}
 	var tabs []string
 	for i, name := range tabNames {
@@ -1273,6 +1396,53 @@ func (m *Model) dockView(w, h int) string {
 				text = strings.ReplaceAll(text, "\n", " ")
 				body = append(body, truncDisplay(fmt.Sprintf("  %d. [%s] %s", i+1, q.Placement, text), w-2))
 			}
+		case dockSubs:
+			// A stale catalog still renders its last rows (the dirty pulse
+			// re-fetches while the tab is on screen); loading… is only for
+			// the cold first page.
+			entries, fresh := subagentEntries(id)
+			if len(entries) == 0 && !fresh {
+				body = append(body, "  "+th.Faint().Render(m.loc.T("dock.subs.loading")))
+				break
+			}
+			if len(entries) == 0 {
+				body = append(body, "  "+m.loc.T("dock.no.subs"))
+				break
+			}
+			for i, e := range entries {
+				glyph, st := "○", th.Faint
+				label, tag := e.Label, ""
+				switch {
+				case e.Kind == "diagnostic":
+					glyph, st, label = "!", th.Warn, e.Reason
+				case e.Activity == "running":
+					glyph, st = "●", th.Accent
+				}
+				if e.Kind == "child" {
+					if label == "" {
+						label = e.Id
+					}
+					if e.Mode == "one-shot" {
+						tag = m.loc.T("dock.subs.oneshot")
+					}
+					if e.HasChildren {
+						if tag != "" {
+							tag += " · "
+						}
+						tag += m.loc.T("dock.subs.children")
+					}
+				}
+				prefix := "  "
+				if i == m.subDockCur {
+					prefix = th.Accent().Render(th.Glyph.Caret + " ")
+				}
+				line := prefix + st().Render(glyph+" ") + th.Plain().Render(label)
+				if tag != "" {
+					line += th.Faint().Render("  " + tag)
+				}
+				body = append(body, truncDisplay(line, w-2))
+			}
+			body = append(body, th.Faint().Render("  "+m.loc.T("dock.subs.hint")))
 		}
 	}
 	lines := padLines(body, w, h)

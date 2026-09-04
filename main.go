@@ -1,3 +1,6 @@
+// Built with AI-assisted development (Deepseek Harness)
+// Copyright (C) 2026 xiangbo3
+
 // dsh-cli is a terminal client for the DeepSeek Harness web server.
 //
 // Usage:
@@ -16,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"dsh-cli/internal/app"
@@ -183,6 +187,16 @@ func runTUI(ctx context.Context, o oneoff.Opts) {
 		tea.WithContext(ctx),
 	)
 	m.SetProg(prog)
+	// A panic in the render/event path must not leave the terminal in
+	// alt-screen with the cursor hidden: restore, dump the stack, exit 1.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "dsh-cli panicked: %v\n", r)
+			debug.PrintStack()
+			fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?25h") // leave alt-screen, show cursor
+			os.Exit(1)
+		}
+	}()
 	if _, err := prog.Run(); err != nil {
 		fatalf("tui: %v", err)
 	}
