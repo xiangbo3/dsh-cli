@@ -6,7 +6,9 @@ package ui
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -232,27 +234,63 @@ func (m *Model) topBar(w int) string {
 		return l
 	}
 	left := compose(title)
-	// The name/version must stay on screen at any width: in narrow
-	// windows the unbounded title takes the truncation budget first,
-	// then the styled left side as a whole (mode/model are bounded but
-	// can still overflow sub-30-column bars).
-	if budget := w - plainWidth(nameVer) - 1; plainWidth(left) > budget {
+	state := m.topStatus()
+
+	// The centered wall clock (HH:MM:SS, local time) needs the right
+	// flank to keep the name/version whole and the left flank at least
+	// one cell; below that the bar is too crowded and keeps the plain
+	// two-block layout.
+	now := m.now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	clock := now.Format("15:04:05")
+	clockW := runewidth.StringWidth(clock)
+	center := (w - clockW) / 2
+	leftW, rightW := center-1, w-center-clockW-1
+	if leftW < 1 || rightW < plainWidth(nameVer) {
+		// The name/version must stay on screen at any width: in narrow
+		// windows the unbounded title takes the truncation budget first,
+		// then the styled left side as a whole (mode/model are bounded
+		// but can still overflow sub-30-column bars); the state readout
+		// absorbs the rest (shrinks first, then drops out entirely).
+		if budget := w - plainWidth(nameVer) - 1; plainWidth(left) > budget {
+			chrome := plainWidth(left) - runewidth.StringWidth(title)
+			left = compose(truncDisplay(title, budget-chrome))
+			if plainWidth(left) > budget {
+				left = truncDisplay(left, budget)
+			}
+		}
+		stateW := w - plainWidth(left) - plainWidth(nameVer) - 2
+		if stateW < 1 {
+			state = ""
+		} else if runewidth.StringWidth(state) > stateW {
+			state = truncDisplay(state, stateW)
+		}
+		right := nameVer
+		if state != "" {
+			right += " " + state
+		}
+		// Right-align on the exact width: pad by the leftover of the actual
+		// right block (not the full avail), or the bar runs past the window
+		// edge and the renderer clips the block off-screen.
+		pad := w - plainWidth(left) - plainWidth(right)
+		if pad < 1 {
+			pad = 1
+		}
+		return left + strings.Repeat(" ", pad) + right
+	}
+	// Clock on: each flank owns its slot — the title takes the truncation
+	// budget within the left slot, and within the right slot the state
+	// readout shrinks (then drops out) before the name/version ever is.
+	if plainWidth(left) > leftW {
 		chrome := plainWidth(left) - runewidth.StringWidth(title)
-		left = compose(truncDisplay(title, budget-chrome))
-		if plainWidth(left) > budget {
-			left = truncDisplay(left, budget)
+		left = compose(truncDisplay(title, leftW-chrome))
+		if plainWidth(left) > leftW {
+			left = truncDisplay(left, leftW)
 		}
 	}
-	// Right edge: the client name and version lead, then the running-state
-	// readout — the strip identifies the program even before a session
-	// lands, and the state icon keeps its own color after the plain readout.
-	// Compose with a hard width budget (visible width: the left side
-	// carries ANSI, which a raw byte count would inflate). The name/version
-	// always fits; the state readout absorbs the clipping (shrinks first,
-	// then drops out entirely in sub-30-column windows).
-	state := m.topStatus()
-	stateW := w - plainWidth(left) - plainWidth(nameVer) - 2
-	if stateW < 1 {
+	if stateW := rightW - plainWidth(nameVer) - 1; stateW < 1 {
 		state = ""
 	} else if runewidth.StringWidth(state) > stateW {
 		state = truncDisplay(state, stateW)
@@ -261,14 +299,12 @@ func (m *Model) topBar(w int) string {
 	if state != "" {
 		right += " " + state
 	}
-	// Right-align on the exact width: pad by the leftover of the actual
-	// right block (not the full avail), or the bar runs past the window
-	// edge and the renderer clips the block off-screen.
-	pad := w - plainWidth(left) - plainWidth(right)
-	if pad < 1 {
-		pad = 1
+	if plainWidth(right) > rightW {
+		right = truncDisplay(right, rightW)
 	}
-	return left + strings.Repeat(" ", pad) + right
+	return left + strings.Repeat(" ", leftW-plainWidth(left)) + " " +
+		th.Faint().Render(clock) + " " +
+		strings.Repeat(" ", rightW-plainWidth(right)) + right
 }
 
 // miniView keeps the persistent top bar alive when the window is too small
@@ -1218,6 +1254,9 @@ func (m *Model) statusBar(w int) string {
 		tokPlain = m.loc.T("status.tokens",
 			th.Glyph.TokenIn+compactInt(int64(in)),
 			th.Glyph.TokenOut+compactInt(int64(out)))
+		if r, ok := m.genRate(); ok {
+			tokPlain += m.loc.T("status.tps", strconv.Itoa(r))
+		}
 		tok = th.Faint().Render(tokPlain)
 	}
 	// Two trailing spaces set the context bar (icon, cells, percentage)
@@ -1240,7 +1279,9 @@ func (m *Model) statusBar(w int) string {
 
 // tokenTotals sums the active session's assistant usage into the same
 // in/out aggregation the turn markers use: in counts prompt input plus
-// cache reads, out counts generated output.
+// cache reads, out counts generated output. The in-flight step's usage
+// is not metered until its end, so its streamed content rides the meter
+// as an estimate (estimateStreamed) until the usage lands.
 func (m *Model) tokenTotals() (in, out int) {
 	id := m.activeID()
 	if id == "" {
@@ -1251,12 +1292,64 @@ func (m *Model) tokenTotals() (in, out int) {
 		return 0, 0
 	}
 	for _, it := range snap.Items {
-		if it.Kind == core.KindAssistant && it.Usage != nil {
+		if it.Kind != core.KindAssistant {
+			continue
+		}
+		if it.Usage != nil {
 			in += it.Usage.InputTokens + it.Usage.CacheReadTokens
 			out += it.Usage.OutputTokens
+			continue
+		}
+		if it == snap.Streaming {
+			out += estimateStreamed(it)
 		}
 	}
 	return in, out
+}
+
+// genRate reports the active session's recent server-side token
+// generation rate: the samples the session has recorded (each assistant
+// message's output at its arrival) averaged over the recent window — the
+// tokens generated since the window's oldest sample, over that span
+// (bounded by the window itself). It tracks the server's pace across
+// turn boundaries; once a session has generated anything the readout
+// stays up (the last rate is cached, so an idle session keeps showing it
+// after the window drains). (0,false) = nothing generated yet.
+func (m *Model) genRate() (int, bool) {
+	id := m.activeID()
+	if id == "" {
+		return 0, false
+	}
+	now := m.now.UnixMilli()
+	window := core.GenWindow.Milliseconds()
+	var (
+		sum    int
+		oldest int64
+	)
+	if snap := m.st.Get(id); snap != nil {
+		for _, s := range snap.Recent {
+			if now-s.At > window {
+				continue
+			}
+			sum += s.Out
+			if oldest == 0 {
+				oldest = s.At // samples are time-ordered: the first in window is the oldest
+			}
+		}
+	}
+	if sum > 0 {
+		span := now - oldest
+		if span > window {
+			span = window
+		}
+		if span > 0 {
+			m.lastGenRate[id] = int(math.Round(float64(sum) / (float64(span) / 1000)))
+		}
+	}
+	if r, ok := m.lastGenRate[id]; ok {
+		return r, true
+	}
+	return 0, false
 }
 
 // modelReadout renders the active session's current model name and

@@ -6,6 +6,7 @@ package core
 import (
 	"encoding/json"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ type Notice struct {
 	Text  string
 	Sess  string
 	Bell  bool
+	Life  time.Duration // toast lifetime (0 = UI default; longer for boot-grade hints)
 }
 
 // TurnEndInfo is the flash payload shown when a turn finishes.
@@ -29,8 +31,9 @@ type TurnEndInfo struct {
 	Reason string
 	Sess   string
 	Ms     int64
-	In     int
+	In     int // input plus cache reads (this turn)
 	Out    int
+	Cache  int // the re-read cache share of In
 	At     time.Time
 	Error  string
 }
@@ -117,6 +120,11 @@ type Store struct {
 	// read through an atomic pointer because the downlink may run while
 	// the UI swaps languages).
 	turnEndTexter atomic.Pointer[TurnEndTexter]
+
+	// activeChanged, when set, points the transcript follow stream at
+	// the focused session (the app installs it; the downlink may run
+	// while the UI swaps focus, so it is read atomically).
+	activeChanged atomic.Pointer[ActiveChangedFn]
 
 	// rev is bumped by every pushDirty: the UI compares it to skip the
 	// transcript re-sync when a frame renders without a state mutation in
@@ -269,6 +277,7 @@ func (s *Store) Active() string {
 // SetActive switches the UI focus session.
 func (s *Store) SetActive(id string) {
 	s.mu.Lock()
+	changed := false
 	if old := s.active; old != id {
 		if os := s.sessions[old]; os != nil {
 			os.fresh = false
@@ -277,8 +286,53 @@ func (s *Store) SetActive(id string) {
 			st.fresh = false
 		}
 		s.active = id
+		changed = true
 		s.pushDirty()
 	}
+	s.mu.Unlock()
+	if changed {
+		if p := s.activeChanged.Load(); p != nil {
+			(*p)(id)
+		}
+	}
+}
+
+// ActiveChangedFn fires with the new focus id ("" when cleared).
+type ActiveChangedFn func(id string)
+
+// SetActiveChanged installs the focus-change hook (the app points the
+// transcript follow stream at the focused session; nil detaches). It is
+// read through an atomic pointer because the downlink may run while the
+// UI swaps focus.
+func (s *Store) SetActiveChanged(f ActiveChangedFn) {
+	if f == nil {
+		s.activeChanged.Store(nil)
+		return
+	}
+	s.activeChanged.Store(&f)
+}
+
+// TouchActivity applies one activity push: the row's updatedAt moves to
+// the newer stamp and the row surfaces toward the list head (the roster
+// is updatedAt-descending; the new host reports activity between the
+// session.list refreshes the legacy build relied on).
+func (s *Store) TouchActivity(id string, updatedAt int64) {
+	s.mu.Lock()
+	st := s.Sess(id)
+	if updatedAt <= st.S.UpdatedAt {
+		s.mu.Unlock()
+		return
+	}
+	st.S.UpdatedAt = updatedAt
+	// The roster is updatedAt-descending: re-sort so the touched row
+	// sits where its new stamp ranks (a peer with a newer stamp stays
+	// ahead of it). Stable, so equal stamps keep their order.
+	if i := s.indexOfOrder(id); i < 0 {
+		s.order = append([]string{id}, s.order...)
+	} else {
+		s.order = s.resortOrder()
+	}
+	s.pushDirty()
 	s.mu.Unlock()
 }
 
@@ -533,6 +587,7 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.Tok
 			}
 			info.In = st.T.TurnTokens.In
 			info.Out = st.T.TurnTokens.Out
+			info.Cache = st.T.TurnTokens.Cache
 			if d.Reason.Error != nil {
 				info.Error = textutil.StripControl(d.Reason.Error.Message)
 			}
@@ -1282,6 +1337,15 @@ func (s *Store) indexOfOrder(id string) int {
 	return -1
 }
 
+// resortOrder re-sorts the roster updatedAt-descending (stable for equal
+// stamps). Callers hold s.mu.
+func (s *Store) resortOrder() []string {
+	sort.SliceStable(s.order, func(i, j int) bool {
+		return s.sessions[s.order[i]].S.UpdatedAt > s.sessions[s.order[j]].S.UpdatedAt
+	})
+	return s.order
+}
+
 // Snapshot is the UI-facing read of one session; callers hold no references
 // after it returns: the items/queue slices are copied, and every struct
 // pointer it exposes is COW-owned by the store — published, then only
@@ -1291,10 +1355,12 @@ type Snapshot struct {
 	Id          string
 	Summary     *protocol.SessionSummary
 	Items       []*Item
+	Streaming   *Item // the in-flight item (its Usage: the live preview)
 	Running     bool
 	TurnActive  bool
 	TurnStart   time.Time
 	TurnTok     TurnTokens
+	Recent      []GenSample // the rolling generation samples (t/s readout)
 	Todos       []protocol.TodoItem
 	Goal        *protocol.GoalProjected
 	Permission  *protocol.PermissionProjection
@@ -1328,11 +1394,12 @@ func (s *Store) Get(id string) *Snapshot {
 		turnStart = time.UnixMilli(st.T.TurnStartAt)
 	}
 	snap := &Snapshot{
-		Id: id, Summary: st.S, Items: st.T.Items,
+		Id: id, Summary: st.S, Items: st.T.Items, Streaming: st.T.Streaming(),
 		Running: st.Running, TurnActive: st.T.TurnActive,
 		TurnStart: turnStart, TurnTok: st.T.TurnTokens,
-		Todos: append([]protocol.TodoItem(nil), st.Todos...),
-		Goal:  st.Goal, Permission: st.Permission, PlanMode: st.PlanMode,
+		Recent: append([]GenSample(nil), st.T.Recent...),
+		Todos:  append([]protocol.TodoItem(nil), st.Todos...),
+		Goal:   st.Goal, Permission: st.Permission, PlanMode: st.PlanMode,
 		Ctx: st.Ctx, CtxPressure: st.CtxPressure, ModelSel: st.ModelSel,
 		Queue:   append([]protocol.QueuedInboxItem(nil), st.Queue...),
 		Jobs:    append([]protocol.JobView(nil), st.Jobs...),

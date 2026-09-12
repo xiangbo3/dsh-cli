@@ -182,6 +182,7 @@ The `ctrl+h` help window (searchable):
 
 - **Dependencies**: Go 1.27+ (to build) and a running `dsh web` (default `http://127.0.0.1:3080`).
 - **Server address**: precedence is the `--url` flag > the `$DSH_URL` env var > `~/.dsh-cli/config.json` (`{"url": "http://host:port"}`) > the built-in default; a failed boot connection hints at starting DSH with `dsh web --no-open`.
+- **Auth token (cookie-gated builds)**: newer `dsh web` boots print a launch token (`http://…/?token=…`). Pass it with `--token`, set `$DSH_LAUNCH_TOKEN`, or let it be stored in config; the client exchanges it for a session cookie on first contact and reuses that cookie on later boots (a stale one re-exchanges once automatically). Older builds need no token.
 - **Default language**: `"language"` in `~/.dsh-cli/config.json` wins; unset, the UI follows the system locale (`LC_ALL`/`LC_MESSAGES`/`LANG`); with neither available, built-in English. A `/language` switch writes the choice back, so it survives restarts.
 - **Local data**: config, locale files, cache and usage stats all live under `~/.dsh-cli`.
 - **License**: [GNU GPLv3](LICENSE).

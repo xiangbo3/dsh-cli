@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"time"
 
 	"dsh-cli/internal/protocol"
 	"dsh-cli/internal/textutil"
@@ -83,8 +84,12 @@ type Item struct {
 
 // TurnTokens aggregates a turn's usage.
 type TurnTokens struct {
-	In  int
+	In  int // input plus cache reads
 	Out int
+	// Cache is the re-read cache share of In: the turn's fresh
+	// throughput is In + Out - Cache (a cache hit re-serves already
+	// processed context, not new work).
+	Cache int
 }
 
 // Transcript is the folded view of one session's event log.
@@ -104,6 +109,11 @@ type Transcript struct {
 	// so the index only moves when Prepend or removeItem shifts it.
 	curItemIdx int
 	streamItem *Item // in-flight streaming item; superseded by assistant/message
+	// live usage preview for the in-flight step (a usage chunk's payload):
+	// folded into TurnTokens as it lands (the canonical message then folds
+	// only the delta), and carried by the in-flight item for the readouts.
+	streamUsage   *protocol.TokenUsage
+	streamSampled bool // the step's generation sample is on record
 	// tool-call result matching
 	openTools map[string]*ToolBlock
 	genSeq    int
@@ -112,7 +122,22 @@ type Transcript struct {
 	TurnStartNum int // turn number of the turn/start that set TurnStartAt (0: unknown)
 	TurnTokens   TurnTokens
 	TurnActive   bool
+	// Recent holds the server's token-generation samples (one per
+	// assistant message, output at arrival), rolling over GenWindow —
+	// the status bar's t/s readout averages these.
+	Recent []GenSample
 }
+
+// GenSample is one point of the server's token generation: the output
+// tokens an assistant message carried, at the time it arrived.
+type GenSample struct {
+	At  int64 // unix milliseconds
+	Out int
+}
+
+// GenWindow bounds the rolling window of generation samples (the
+// status bar's t/s readout's "recent").
+const GenWindow = 60 * time.Second
 
 // attrTurn keeps TurnStartAt attributed to the turn that started it. A
 // re-baseline tail page that predates the current turn's turn/start may
@@ -260,6 +285,12 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		var d protocol.AssistantMessageEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
 			return false, nil
+		}
+		// The live preview belongs to the in-flight (turn, step); a
+		// canonical for another step (a replay gap) counts from scratch.
+		if !(t.streaming && t.curTurn == d.Turn && t.curStep == d.Step) {
+			t.streamUsage = nil
+			t.streamSampled = false
 		}
 		t.finalizeStreaming()
 		t.attrTurn(d.Turn)
@@ -523,6 +554,16 @@ func (t *Transcript) noteSeq(seq int64, time int64) {
 	}
 }
 
+// Streaming is the in-flight item the fold is assembling (nil when no
+// step is mid-stream): its Usage is the live preview (a usage chunk),
+// nil until one lands.
+func (t *Transcript) Streaming() *Item {
+	if t.streaming {
+		return t.streamItem
+	}
+	return nil
+}
+
 // ---- streaming assembly ----------------------------------------------------
 
 func (t *Transcript) beginStreaming(turn, step int) bool {
@@ -538,6 +579,8 @@ func (t *Transcript) beginStreaming(turn, step int) bool {
 	t.curBlocks = map[int]*ABlock{}
 	t.curOrder = nil
 	t.curItem = nil
+	t.streamUsage = nil
+	t.streamSampled = false
 	return true
 }
 
@@ -592,7 +635,17 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 			}
 		}
 	case "usage":
-		// usage rides block-end/finish; captured via assistant/message
+		// The step's usage lands ahead of the canonical message: count it
+		// live (the canonical folds only the delta) and keep it on the
+		// in-flight item for the status readouts.
+		if c.Usage != nil {
+			addUsageDelta(&t.TurnTokens, t.streamUsage, c.Usage)
+			t.streamUsage = c.Usage
+			if !t.streamSampled && c.Usage.OutputTokens > 0 {
+				t.addGenSample(time, c.Usage.OutputTokens)
+				t.streamSampled = true
+			}
+		}
 	case "finish":
 		if c.Reason != nil && (c.Reason.Kind == "max-tokens" || c.Reason.Kind == "error" || c.Reason.Kind == "aborted") {
 			// The turn/end event carries the authoritative outcome; the
@@ -633,7 +686,7 @@ func (t *Transcript) refreshStreamingItem(time int64) {
 		}
 		blocks = append(blocks, cp)
 	}
-	it := &Item{Kind: KindAssistant, Time: time, Turn: t.curTurn, Step: t.curStep, Blocks: blocks}
+	it := &Item{Kind: KindAssistant, Time: time, Turn: t.curTurn, Step: t.curStep, Usage: t.streamUsage, Blocks: blocks}
 	if t.curItem == nil {
 		t.Items = append(t.Items, t.stamp(it))
 		t.curItem = it
@@ -684,7 +737,15 @@ func (t *Transcript) replaceStreamed(it *Item) int {
 
 func (t *Transcript) buildAssistantItem(m *protocol.Message, usage *protocol.TokenUsage, turn, step int, seq, time int64) *Item {
 	it := t.stamp(&Item{Kind: KindAssistant, Seq: seq, Time: time, Usage: usage, Turn: turn, Step: step})
-	addUsage(&t.TurnTokens, usage)
+	// The live preview (a usage chunk) already folded this step's usage;
+	// add only the remainder (zero when it carried the full usage).
+	addUsageDelta(&t.TurnTokens, t.streamUsage, usage)
+	if usage != nil && usage.OutputTokens > 0 && !t.streamSampled {
+		t.addGenSample(time, usage.OutputTokens)
+		t.streamSampled = true
+	}
+	t.streamUsage = nil
+	t.streamSampled = false
 	for _, b := range m.Content {
 		switch b.Type {
 		case "text":
@@ -720,12 +781,33 @@ func (t *Transcript) ensureToolBlock(tb *ToolBlock) {
 	}
 }
 
-func addUsage(tt *TurnTokens, u *protocol.TokenUsage) {
-	if u == nil {
-		return
+// addUsageDelta folds (next - prev) into tt: the live preview is counted
+// as it lands, and the canonical message folds only the remainder. Nil
+// sides count as a zero usage.
+func addUsageDelta(tt *TurnTokens, prev, next *protocol.TokenUsage) {
+	var p, n protocol.TokenUsage
+	if prev != nil {
+		p = *prev
 	}
-	tt.In += u.InputTokens + u.CacheReadTokens
-	tt.Out += u.OutputTokens
+	if next != nil {
+		n = *next
+	}
+	tt.In += n.InputTokens - p.InputTokens + n.CacheReadTokens - p.CacheReadTokens
+	tt.Out += n.OutputTokens - p.OutputTokens
+	tt.Cache += n.CacheReadTokens - p.CacheReadTokens
+}
+
+// addGenSample records one assistant message's output tokens (the
+// server's generation, as distinct from the input it was served) and
+// prunes samples that have fallen out of the rolling window.
+func (t *Transcript) addGenSample(at int64, out int) {
+	t.Recent = append(t.Recent, GenSample{At: at, Out: out})
+	cut := at - GenWindow.Milliseconds()
+	i := 0
+	for i < len(t.Recent) && t.Recent[i].At < cut {
+		i++
+	}
+	t.Recent = t.Recent[i:]
 }
 
 // truncateMiddle keeps head + tail (shared rune-safe helper).

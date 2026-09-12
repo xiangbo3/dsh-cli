@@ -24,7 +24,7 @@ func Status(ctx context.Context, o Opts) error {
 	if err := o.Fill(); err != nil {
 		return err
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	store := a.Start(ctx)
 	h, err := a.Client().Describe(ctx)
 	if err != nil {
@@ -61,7 +61,7 @@ func Ls(ctx context.Context, o Opts) error {
 	if err := o.Fill(); err != nil {
 		return err
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	store := a.Start(ctx)
 	// Wait for the host to answer, then fetch the roster synchronously: the
 	// background baseline may have landed only a partial (or preset-less)
@@ -104,7 +104,7 @@ func Workspaces(ctx context.Context, o Opts) error {
 	if err := o.Fill(); err != nil {
 		return err
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	store := a.Start(ctx)
 	loc := i18n.LoadDefault()
 	deadline := time.Now().Add(10 * time.Second)
@@ -156,7 +156,7 @@ func ActiveForModels(ctx context.Context, o Opts) string {
 	if err := o.Fill(); err != nil {
 		return ""
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	store := a.Start(ctx)
 	deadline := time.Now().Add(8 * time.Second)
 	for len(store.Roster()) == 0 {
@@ -178,7 +178,7 @@ func NewSession(ctx context.Context, o Opts) (string, error) {
 	if err := o.Fill(); err != nil {
 		return "", err
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	// Baseline the workspace registry before create: a cwd on a
 	// registered workspace is sent as the workspace id (the web
 	// New-Session path) so the session is born accounted — mirroring
@@ -195,7 +195,7 @@ func History(ctx context.Context, o Opts, sessionID string) error {
 	if err := o.Fill(); err != nil {
 		return err
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	store := a.Start(ctx)
 
 	// Pull all pages (tail, then older) and fold into one transcript.
@@ -258,7 +258,7 @@ func Models(ctx context.Context, o Opts, sessionID string) error {
 	if err := o.Fill(); err != nil {
 		return err
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	ms, err := a.Client().Models(ctx, sessionID)
 	if err != nil {
 		return err

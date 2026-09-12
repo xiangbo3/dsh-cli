@@ -1,17 +1,22 @@
 // Built with AI-assisted development (Deepseek Harness)
 // Copyright (C) 2026 xiangbo3
 
-// Package usage is dsh-cli's persistent token-usage statistics. Every
-// counted assistant message folds into a per-session, per-workspace,
-// per-local-day table under ~/.dsh-cli (usage.json), and the /status
-// popup's report — all-time total, this month, this week, today, per
-// workspace, per session — is computed from that table.
+// Package usage is dsh-cli's persistent token-usage statistics. Usage
+// folds into a per-session, per-workspace, per-local-day table under
+// ~/.dsh-cli (usage.json), and the /status popup's report — all-time
+// total, this month, this week, today, per workspace, per session — is
+// computed from that table.
 //
-// Counting is idempotent per (session, event seq): a history page the
-// client re-loads (boot, reconnect, scrolling to the top) never double-
-// counts, because already-counted seqs are remembered per session.
-// Recording is best-effort throughout — a missing or unwritable home
-// directory degrades the statistics, never the app.
+// The host's cumulative tokenUsage projection is the accounting
+// authority: each session's baselines (the live session/projection
+// pushes, the tail page's projections block, the roster rows) are
+// confirmed in seq order and only their advance over the previous
+// baseline is counted — the same numbers the web client shows, the
+// in-flight step's sample included. Per-event counting (assistant
+// messages) remains the fallback for hosts without the projection,
+// idempotent per (session, event seq) so re-loaded history pages never
+// double-count. Recording is best-effort throughout — a missing or
+// unwritable home directory degrades the statistics, never the app.
 package usage
 
 import (
@@ -74,6 +79,16 @@ func (t *Totals) addDay(d DayTotals) {
 // Count is the in+out token volume.
 func (t Totals) Count() int { return t.In + t.Out }
 
+// ProjState is one session's last-confirmed host tokenUsage baseline:
+// the cumulative total the host reported, at the log seq it covered.
+type ProjState struct {
+	Seq int64 `json:"seq"`
+	In  int   `json:"in"`
+	Out int   `json:"out"`
+	CR  int   `json:"cr"`
+	CW  int   `json:"cw"`
+}
+
 // File is the on-disk document (~/.dsh-cli/usage.json).
 type File struct {
 	V int `json:"v"`
@@ -82,6 +97,9 @@ type File struct {
 	Seqs map[string][]int64 `json:"seqs,omitempty"`
 	// Last is the last counted usage's unixmilli per session.
 	Last map[string]int64 `json:"last,omitempty"`
+	// Proj is the confirmed host tokenUsage baseline per session (the
+	// next baseline's counted advance is measured against it).
+	Proj map[string]ProjState `json:"proj,omitempty"`
 	// Days: session → workspace key → local day → counters.
 	Days map[string]map[string]map[string]DayTotals `json:"days,omitempty"`
 }
@@ -144,6 +162,7 @@ func New(path string) *Recorder {
 			V:    fileVersion,
 			Seqs: map[string][]int64{},
 			Last: map[string]int64{},
+			Proj: map[string]ProjState{},
 			Days: map[string]map[string]map[string]DayTotals{},
 		},
 		seen: map[string]map[int64]bool{},
@@ -156,6 +175,9 @@ func New(path string) *Recorder {
 			}
 			if f.Last == nil {
 				f.Last = map[string]int64{}
+			}
+			if f.Proj == nil {
+				f.Proj = map[string]ProjState{}
 			}
 			if f.Days == nil {
 				f.Days = map[string]map[string]map[string]DayTotals{}
@@ -223,6 +245,21 @@ func (r *Recorder) Record(sid, ws string, ts, seq int64, u *protocol.TokenUsage)
 		}
 	}
 
+	r.addDayLocked(sid, key, ts, day, DayTotals{
+		In: u.InputTokens, Out: u.OutputTokens,
+		CR: u.CacheReadTokens, CW: u.CacheWriteTokens, R: u.ReasoningTokens,
+	})
+	if ts > r.f.Last[sid] {
+		r.f.Last[sid] = ts
+	}
+	r.dirty = true
+	r.scheduleFlush()
+	return true
+}
+
+// addDayLocked folds one counter set into the day table (callers hold
+// r.mu).
+func (r *Recorder) addDayLocked(sid, key string, ts int64, day string, d DayTotals) {
 	sdays := r.f.Days[sid]
 	if sdays == nil {
 		sdays = map[string]map[string]DayTotals{}
@@ -233,16 +270,105 @@ func (r *Recorder) Record(sid, ws string, ts, seq int64, u *protocol.TokenUsage)
 		wsdays = map[string]DayTotals{}
 		sdays[key] = wsdays
 	}
-	wsdays[day] = wsdays[day].Add(DayTotals{
-		In: u.InputTokens, Out: u.OutputTokens,
-		CR: u.CacheReadTokens, CW: u.CacheWriteTokens, R: u.ReasoningTokens,
-	})
+	wsdays[day] = wsdays[day].Add(d)
+}
+
+// advance clamps a baseline delta component at zero: the cumulative
+// host total moves only forward, so a step down is out-of-order noise,
+// not a correction.
+func advance(now, prev int) int {
+	if now > prev {
+		return now - prev
+	}
+	return 0
+}
+
+// RecordProjection confirms one host tokenUsage baseline (the session's
+// cumulative total as of seq) and counts its advance over the session's
+// previous baseline — the live pushes, tail pages and roster rows all
+// confirm through here, in seq order, so none double-counts. The first
+// baseline counts the cumulative minus the session's already-recorded
+// total (the per-event fallback's work): that repairs what per-event
+// counting missed — pruned history, web-only steps — without
+// re-counting what it already had. ts is the confirmation instant (0:
+// now); the counted advance is filed on that day.
+//
+// Returns whether a positive advance was counted.
+func (r *Recorder) RecordProjection(sid, ws string, ts, seq int64, u *protocol.TokenUsageHost) bool {
+	if sid == "" || u == nil || seq <= 0 {
+		return false
+	}
+	if ts <= 0 {
+		ts = time.Now().UnixMilli()
+	}
+	key := ws
+	if key == "" {
+		key = "unknown"
+	}
+	day := time.UnixMilli(ts).Format("2006-01-02")
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	prev := r.f.Proj[sid]
+	if prev.Seq >= seq {
+		// A re-delivered or stale baseline (lower seqs carry lower
+		// cumulative values by the host's accounting).
+		return false
+	}
+	d := DayTotals{
+		In:  advance(u.In, prev.In),
+		Out: advance(u.Out, prev.Out),
+		CR:  advance(u.CR, prev.CR),
+		CW:  advance(u.CW, prev.CW),
+	}
+	if prev.Seq == 0 {
+		// First baseline: subtract what per-event counting already has.
+		rec := r.recordedTotalLocked(sid)
+		d.In = advance(d.In, rec.In)
+		d.Out = advance(d.Out, rec.Out)
+		d.CR = advance(d.CR, rec.CR)
+		d.CW = advance(d.CW, rec.CW)
+	}
+	r.f.Proj[sid] = ProjState{Seq: seq, In: u.In, Out: u.Out, CR: u.CR, CW: u.CW}
+	if d.In == 0 && d.Out == 0 && d.CR == 0 && d.CW == 0 {
+		return false
+	}
+	r.addDayLocked(sid, key, ts, day, d)
 	if ts > r.f.Last[sid] {
 		r.f.Last[sid] = ts
 	}
 	r.dirty = true
 	r.scheduleFlush()
 	return true
+}
+
+// recordedTotalLocked is the session's counted total so far (all
+// workspaces, all days; callers hold r.mu).
+func (r *Recorder) recordedTotalLocked(sid string) DayTotals {
+	var t DayTotals
+	for _, wsdays := range r.f.Days[sid] {
+		for _, d := range wsdays {
+			t = t.Add(d)
+		}
+	}
+	return t
+}
+
+// SessionTotal is one session's counted total (all workspaces, all days).
+func (r *Recorder) SessionTotal(sid string) DayTotals {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.recordedTotalLocked(sid)
+}
+
+// ProjectionManaged reports whether the session's totals are owned by
+// the host's tokenUsage baselines: per-event counting must then skip
+// the session (the baselines already include its assistant messages).
+func (r *Recorder) ProjectionManaged(sid string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.f.Proj[sid].Seq > 0
 }
 
 // scheduleFlush arms the debounced write (callers hold r.mu; the timer

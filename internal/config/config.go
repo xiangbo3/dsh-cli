@@ -40,19 +40,50 @@ type Config struct {
 	// the UI follows the locale environment instead. /language switches
 	// write the chosen face back here so the default survives restarts.
 	Language string `json:"language,omitempty"`
+	// Token is a launch token the web server printed at startup (the
+	// ?token= credential). The cookie-gated web build exchanges it for
+	// a session cookie on first contact; the token is kept so the
+	// exchange can repeat when the cookie goes stale. Empty (or
+	// omitted): no launch token — only an un-gated (old) build, or a
+	// stored Cookie for the same base, can be reached.
+	Token string `json:"token,omitempty"`
+	// Cookie is the exchanged session cookie ("name=value"), valid
+	// only for the base recorded in CookieFor.
+	Cookie string `json:"cookie,omitempty"`
+	// CookieFor is the server base the stored cookie was minted for
+	// (a cookie binds to the host authority that minted it; another
+	// base needs a fresh exchange).
+	CookieFor string `json:"cookieFor,omitempty"`
+	// TokenInPrice / TokenOutPrice are the per-one-million-tokens costs
+	// for input / output tokens (the /status billing section's editable
+	// fields, applied live; the currency is implied). Zero: no cost
+	// readout anywhere.
+	TokenInPrice  float64 `json:"tokenInPrice,omitempty"`
+	TokenOutPrice float64 `json:"tokenOutPrice,omitempty"`
+	// TokenPrice is the pre-split single price (migrated to the input
+	// price on load; dropped from the file on the next save).
+	TokenPrice float64 `json:"tokenPrice,omitempty"`
 }
 
-// path resolves the on-disk location; the DSH_CLI_HOME env var replaces
-// the data directory (the test suite points it at a temp dir to stay
-// hermetic against the user's real config).
+// DataDir is the program's data root: ~/.dsh-cli, or the DSH_CLI_HOME env
+// var (the test suite points it at a temp dir to stay hermetic against
+// the user's real config). Config, locales, cache, and the auto-started
+// dsh web's log live here.
+func DataDir() (string, error) {
+	if root := os.Getenv("DSH_CLI_HOME"); root != "" {
+		return root, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".dsh-cli"), nil
+}
+
 func path() (string, error) {
-	root := os.Getenv("DSH_CLI_HOME")
-	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		root = filepath.Join(home, ".dsh-cli")
+	root, err := DataDir()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(root, File), nil
 }
@@ -75,6 +106,14 @@ func Load() Config {
 	var c Config
 	if json.Unmarshal(raw, &c) != nil {
 		return Config{}
+	}
+	// Pre-split price files (one tokenPrice for everything): carry it
+	// over to the input price and drop the legacy key.
+	if c.TokenPrice > 0 {
+		if c.TokenInPrice <= 0 {
+			c.TokenInPrice = c.TokenPrice
+		}
+		c.TokenPrice = 0
 	}
 	// A stale file (written by another dsh-cli version, or unmarked from
 	// before the marker) is completed with the options this version

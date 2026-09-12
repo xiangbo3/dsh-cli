@@ -61,6 +61,7 @@ var en = map[string]string{
 	"dock.subs.loading":  "loading…",
 	"dock.subs.oneshot":  "one-shot",
 	"dock.subs.title":    "subagent — ",
+	"dock.subs.winhint":  "↑↓ pgup/pgdn wheel scroll · esc close",
 
 	// ---- @ completion (running children + cwd paths)
 	"at.child":   "subagent",
@@ -86,6 +87,10 @@ var en = map[string]string{
 	// prepended by the status bar ("tokens: ↓1.6M ↑21.1K") — locale
 	// edits cannot change the arrows, only the label and separator.
 	"status.tokens": " tokens: %s %s",
+	// %s carries the recent server-side generation rate (" · 70t/s"),
+	// appended by the status bar right after the tokens readout. It stays
+	// on once the session has generated (the last rate is kept when idle).
+	"status.tps": " · %st/s",
 
 	// ---- boot splash
 	"splash.hint":    "any key to continue",
@@ -97,6 +102,10 @@ var en = map[string]string{
 	"toast.permission.unknown":  "permission: unknown (session baseline pending)",
 	"toast.permission.switched": "permission → %s",
 	"host.down":                 "dsh is not running — start it first with: dsh web --no-open",
+	"webhost.launched":          "dsh web was not running — started it (pid %d, %s); it keeps running after dsh-cli exits",
+	"webhost.restarted":         "stored credentials rejected — restarted dsh web (pid %d, %s); it keeps running after dsh-cli exits",
+	"auth.needed":               "dsh web needs a launch token — copy the ?token=… URL it printed and run: dsh-cli --token <token>",
+	"auth.stale":                "the stored launch token was rejected — dsh web likely restarted; run the fresh ?token=… URL it printed with: dsh-cli --token <token>",
 	"toast.host.connecting":     "host: connecting…",
 	"toast.insecure.tls":        "DSH_INSECURE: server certificate not verified",
 	"toast.locale.lag":          "%d new strings fall back to English: your locale file is behind (delete ~/.dsh-cli/locales/%s.json to reseed)",
@@ -138,15 +147,20 @@ var en = map[string]string{
 
 	// ---- /status popup (token-usage statistics, ~/.dsh-cli)
 	"status.title":          "status & usage",
-	"status.hint":           "  ← → sections · ↑↓ rows · 1-3 jump · esc close",
+	"status.hint":           "  ← → sections · ↑↓ rows · 1-4 jump · esc close",
 	"status.tab.overview":   "overview",
 	"status.tab.workspaces": "workspaces",
 	"status.tab.sessions":   "sessions",
+	"status.tab.billing":    "billing",
 	"status.ov.total":       "total",
 	"status.ov.month":       "this month",
 	"status.ov.week":        "this week",
 	"status.ov.day":         "today",
 	"status.ov.tok":         "%s in / %s out",
+	"status.cost":           " (%s)",
+	"status.price.in":       "input price per 1M",
+	"status.price.out":      "output price per 1M",
+	"status.price.hint":     "↑↓ field · type a number (applies at once, blank clears)",
 	"status.ov.none":        "(no usage recorded yet)",
 	"status.no.recorder":    "(not recording — no usage document under ~/.dsh-cli)",
 	"status.ws.none":        "(no workspace usage recorded yet)",
@@ -194,7 +208,7 @@ var en = map[string]string{
 	"help.session.dropq":     "    ctrl+x               drop the oldest queued message",
 	"help.session.verbose":   "    ctrl+e               toggle verbose detail (input empty)",
 	"help.session.help":      "    ctrl+h               help window (search filters entries)",
-	"help.session.quit":      "    ctrl+q / ctrl+d      quit (input empty)",
+	"help.session.quit":      "    ctrl+q / ctrl+c      quit (input empty)",
 	"help.session.clear":     "    ctrl+c               copy selection · clear input · quit",
 	"help.sec.running":       "  Running",
 	"help.running.esc":       "    esc                  interrupt the turn",

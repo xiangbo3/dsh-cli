@@ -61,7 +61,7 @@ func TestTUISmokeHeadless(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		prog.Send(tea.KeyMsg{Type: tea.KeyEsc}) // close the session window (empty query)
 		time.Sleep(150 * time.Millisecond)
-		prog.Send(tea.KeyMsg{Type: tea.KeyCtrlD})
+		prog.Send(tea.KeyMsg{Type: tea.KeyCtrlQ})
 	}()
 
 	if _, err := prog.Run(); err != nil {
@@ -125,6 +125,18 @@ func TestInputSpaceAndQuit(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		if got := probe(); got != "" {
 			t.Errorf("clear failed: input = %q", got)
+		}
+		// ctrl+d on the now-empty input is the editor's delete-forward
+		// (a no-op), NOT an EOF quit: the program must still answer a
+		// probe after it.
+		prog.Send(tea.KeyMsg{Type: tea.KeyCtrlD})
+		time.Sleep(100 * time.Millisecond)
+		reply := make(chan string, 1)
+		prog.Send(inputProbeMsg{reply: reply})
+		select {
+		case <-reply:
+		case <-time.After(2 * time.Second):
+			t.Error("ctrl+d on empty input quit the program")
 		}
 		prog.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
 	}()

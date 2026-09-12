@@ -145,9 +145,10 @@ const (
 
 // Downlink stream paths and frame types.
 const (
-	StreamMux   = "/api/events.mux"
-	StreamHost  = "/api/events.host"
-	PathRespond = "/api/respond"
+	StreamMux       = "/api/events.mux"
+	StreamHost      = "/api/events.host"
+	StreamRemoteMux = "/api/remote.mux" // the cookie-gated build's single downlink
+	PathRespond     = "/api/respond"
 )
 
 // Mux stream frame types.
@@ -162,6 +163,11 @@ const (
 	FMuxJobs        = "session/jobs"
 	FMuxProjection  = "session/projection"
 	FStreamError    = "stream/error"
+	// FMuxActivity and FMuxPresetSelected are synthetic frames the
+	// cookie-gated downlink re-emits from its $events bus (the legacy
+	// host pushed no equivalent).
+	FMuxActivity       = "session/activity"
+	FMuxPresetSelected = "agent-preset/selected"
 )
 
 // Host stream frame types.

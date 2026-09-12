@@ -395,6 +395,9 @@ type StreamChunk struct {
 	Block *ContentBlock `json:"block,omitempty"`
 	// finish
 	Reason *FinishReason `json:"reason,omitempty"`
+	// usage: the step's token accounting (the adapter emits it before the
+	// terminal finish; nothing follows a usage chunk)
+	Usage *TokenUsage `json:"usage,omitempty"`
 }
 
 // FinishReason is why a model response stopped.
@@ -417,6 +420,18 @@ type TokenUsage struct {
 	CacheReadTokens  int `json:"cacheReadTokens,omitempty"`
 	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"`
 	ReasoningTokens  int `json:"reasoningTokens,omitempty"`
+}
+
+// TokenUsageHost is the host-side cumulative token projection (the
+// "tokenUsage" value of session/projection pushes, the tail page's
+// projections block, and the roster rows): the session's totals as of
+// the frame's seq, input split into uncached and cache-read like the
+// host's own accounting (a running step's in-flight sample included).
+type TokenUsageHost struct {
+	In  int `json:"uncachedInputTokens"`
+	Out int `json:"outputTokens"`
+	CR  int `json:"cacheReadTokens"`
+	CW  int `json:"cacheWriteTokens"`
 }
 
 // TurnEndReason is why a turn ended.

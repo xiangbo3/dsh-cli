@@ -16,21 +16,25 @@ import (
 	"github.com/charmbracelet/bubbletea"
 )
 
-// subagentModal is a read-only window over one child's event log
-// (subagent.history, one page, chronological).
+// subagentModal is a scrollable window over one child's event log
+// (subagent.history, one page, chronological): the conversation rarely
+// fits the popup body, so the page walks with the arrows, the page keys,
+// and the mouse wheel (wheelModal).
 type subagentModal struct {
 	parent, child, mode, label string
 	loading                    bool
 	err                        string
 	lines                      []string
+	top                        int // first visible line (scroll offset)
+	vis                        int // body height the last view rendered (page size)
 	loc                        *i18n.Locale
 }
 
-func (s subagentModal) title() string { return s.loc.T("dock.subs.title") + s.label }
+func (s *subagentModal) title() string { return s.loc.T("dock.subs.title") + s.label }
 
-func (s subagentModal) hint() string { return s.loc.T("dock.subs.close") }
+func (s *subagentModal) hint() string { return s.loc.T("dock.subs.winhint") }
 
-func (s subagentModal) view(m *Model, w, h int) []string {
+func (s *subagentModal) view(m *Model, w, h int) []string {
 	th := m.th
 	if s.loading {
 		return []string{th.Faint().Render("  " + s.loc.T("dock.subs.loading"))}
@@ -41,15 +45,84 @@ func (s subagentModal) view(m *Model, w, h int) []string {
 	if len(s.lines) == 0 {
 		return []string{th.Faint().Render("  " + s.loc.T("dock.subs.empty"))}
 	}
-	return s.lines
+	if h < 1 {
+		h = 1
+	}
+	// A page shorter than the window stands as is: the slice ends at the
+	// last line, and vis takes the rendered height (the clamp keeps
+	// top honest either way).
+	end := s.top + h
+	if end > len(s.lines) {
+		end = len(s.lines)
+	}
+	s.vis = end - s.top
+	if s.vis < 1 {
+		s.vis = 1
+	}
+	if s.top < 0 {
+		s.top = 0
+	}
+	if max := s.maxTop(); s.top > max {
+		s.top = max
+	}
+	return s.lines[s.top:end]
 }
 
-func (s subagentModal) update(km tea.KeyMsg) (tea.Cmd, bool) {
+// maxTop is the largest first-visible offset the window can hold (0 when
+// the page fits; the window is sized by the last rendered view).
+func (s *subagentModal) maxTop() int {
+	m := len(s.lines) - maxInt(1, s.vis)
+	if m < 0 {
+		return 0
+	}
+	return m
+}
+
+// step moves the window by d lines (negative = up), clamped to the page.
+func (s *subagentModal) step(d int) {
+	s.top += d
+	if s.top < 0 {
+		s.top = 0
+	}
+	if max := s.maxTop(); s.top > max {
+		s.top = max
+	}
+}
+
+// page is one page-scroll move: a full window minus the overlap line.
+func (s *subagentModal) page() int {
+	p := s.vis - 1
+	if p < 1 {
+		return 1
+	}
+	return p
+}
+
+// wheel takes one mouse-wheel notch (±wheelStep lines); the modal owns
+// the wheel while open, so it is always consumed.
+func (s *subagentModal) wheel(d int) bool {
+	s.step(d)
+	return true
+}
+
+func (s *subagentModal) update(km tea.KeyMsg) (tea.Cmd, bool) {
 	switch km.Type {
 	case tea.KeyEsc, tea.KeyEnter, tea.KeyCtrlH:
-		return nil, true
+		return nil, true // closing chord (the dispatch closes it)
+	case tea.KeyUp:
+		s.step(-1)
+	case tea.KeyDown:
+		s.step(1)
+	case tea.KeyPgUp:
+		s.step(-s.page())
+	case tea.KeyPgDown:
+		s.step(s.page())
+	case tea.KeyHome:
+		s.top = 0
+	case tea.KeyEnd:
+		s.top = s.maxTop()
 	}
-	return nil, false
+	return nil, true
 }
 
 // subHistoryLines renders a child's event page: user and assistant
@@ -122,6 +195,13 @@ func (f editField) col() int { return 2 + plainWidth(f.prefix) }
 type mouseEditor interface {
 	mouseFields(m *Model) []editField
 	paste(text string) bool
+}
+
+// wheelModal is a modal that scrolls its own body on the mouse wheel
+// (instead of the transcript behind it) while open; wheel takes one
+// notch (±wheelStep lines) and reports whether it was consumed.
+type wheelModal interface {
+	wheel(d int) bool
 }
 
 // frame renders a modal as the centered popup box (crush's dialog

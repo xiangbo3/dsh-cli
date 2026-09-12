@@ -77,7 +77,7 @@ func TestBootCtrlPEndToEnd(t *testing.T) {
 			lastCmds(t, a, a.Store().Active())
 		}
 		time.Sleep(500 * time.Millisecond)
-		prog.Send(tea.KeyMsg{Type: tea.KeyCtrlD})
+		prog.Send(tea.KeyMsg{Type: tea.KeyCtrlQ})
 	}()
 
 	if _, err := prog.Run(); err != nil {

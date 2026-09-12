@@ -125,6 +125,104 @@ func TestFoldStreamingAssembly(t *testing.T) {
 	}
 }
 
+// The usage chunk (the adapter's step accounting, landing ahead of the
+// canonical message) counts live: the turn tokens, the in-flight item and
+// the generation sample move at once, and the canonical message folds only
+// the remainder (no double count, no double sample).
+func TestFoldUsageChunkLive(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(ev(t, "turn/start", 1, map[string]any{"turn": 1}))
+	chunk := func(seq int64, data map[string]any) {
+		t.Helper()
+		tr.Apply(ev(t, "assistant/chunk", seq, map[string]any{
+			"turn": 1, "step": 1, "chunk": data,
+		}))
+	}
+	chunk(2, map[string]any{"type": "block-start", "index": 0, "blockType": "text"})
+	chunk(3, map[string]any{"type": "text-delta", "index": 0, "text": "Hel"})
+	chunk(4, map[string]any{"type": "text-delta", "index": 0, "text": "lo"})
+
+	// The usage chunk: the step's accounting lands before the canonical.
+	chunk(5, map[string]any{"type": "usage", "usage": map[string]any{
+		"inputTokens": 100, "cacheReadTokens": 30, "outputTokens": 20,
+	}})
+	if tr.TurnTokens.In != 130 || tr.TurnTokens.Out != 20 || tr.TurnTokens.Cache != 30 {
+		t.Fatalf("turn tokens after usage chunk = %+v, want In 130 Out 20 Cache 30", tr.TurnTokens)
+	}
+	if s := tr.Streaming(); s == nil || s.Usage == nil {
+		t.Fatalf("in-flight item carries no live usage: %+v", s)
+	} else if s.Usage.InputTokens != 100 || s.Usage.CacheReadTokens != 30 || s.Usage.OutputTokens != 20 {
+		t.Fatalf("live usage = %+v", s.Usage)
+	}
+	if len(tr.Recent) != 1 || tr.Recent[0].Out != 20 {
+		t.Fatalf("gen samples after usage chunk = %+v, want one (20 out)", tr.Recent)
+	}
+
+	// The canonical message with the same usage folds no remainder.
+	msg := assistantMsg("m1", "text")
+	msg["usage"] = map[string]any{"inputTokens": 100, "cacheReadTokens": 30, "outputTokens": 20}
+	tr.Apply(ev(t, "assistant/message", 6, msg))
+	if tr.TurnTokens.In != 130 || tr.TurnTokens.Out != 20 || tr.TurnTokens.Cache != 30 {
+		t.Fatalf("turn tokens after canonical = %+v (double count)", tr.TurnTokens)
+	}
+	if len(tr.Recent) != 1 {
+		t.Fatalf("gen samples after canonical = %d, want 1 (double sample)", len(tr.Recent))
+	}
+	last := tr.Items[len(tr.Items)-1]
+	if last.Seq != 6 || last.Usage == nil || tr.Streaming() != nil {
+		t.Fatalf("canonical = %+v, streaming = %+v", last, tr.Streaming())
+	}
+
+	// The turn-end marker carries the counted totals.
+	tr.Apply(ev(t, "turn/end", 7, map[string]any{
+		"turn": 1, "reason": map[string]any{"kind": "completed"},
+	}))
+	end := tr.Items[len(tr.Items)-1]
+	if end.Kind != KindTurnEnd || end.TurnTok.In != 130 || end.TurnTok.Out != 20 {
+		t.Fatalf("turn end = %+v", end)
+	}
+}
+
+// A canonical message for a step that streamed no usage chunk still counts
+// from the canonical (the preview is nil, the delta is the full usage); a
+// partial preview folds the remainder on top.
+func TestFoldUsageChunkDelta(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(ev(t, "turn/start", 1, map[string]any{"turn": 1}))
+	chunk := func(seq int64, step int, data map[string]any) {
+		t.Helper()
+		tr.Apply(ev(t, "assistant/chunk", seq, map[string]any{
+			"turn": 1, "step": step, "chunk": data,
+		}))
+	}
+
+	// Step 1: no usage chunk — the canonical alone counts the step.
+	chunk(2, 1, map[string]any{"type": "block-start", "index": 0, "blockType": "text"})
+	chunk(3, 1, map[string]any{"type": "text-delta", "index": 0, "text": "one"})
+	msg1 := assistantMsg("m1", "text")
+	msg1["step"] = 1
+	tr.Apply(ev(t, "assistant/message", 4, msg1))
+	if tr.TurnTokens.In != 100 || tr.TurnTokens.Out != 20 {
+		t.Fatalf("step 1 tokens = %+v, want In 100 Out 20", tr.TurnTokens)
+	}
+
+	// Step 2: a partial preview, then the canonical's fuller accounting.
+	chunk(5, 2, map[string]any{"type": "text-delta", "index": 0, "text": "two"})
+	chunk(6, 2, map[string]any{"type": "usage", "usage": map[string]any{
+		"inputTokens": 50, "outputTokens": 10,
+	}})
+	msg2 := assistantMsg("m2", "text")
+	msg2["step"] = 2
+	msg2["usage"] = map[string]any{"inputTokens": 50, "outputTokens": 12}
+	tr.Apply(ev(t, "assistant/message", 7, msg2))
+	if tr.TurnTokens.In != 150 || tr.TurnTokens.Out != 32 {
+		t.Fatalf("step 2 tokens = %+v, want In 150 Out 32 (preview + remainder)", tr.TurnTokens)
+	}
+	if len(tr.Recent) != 2 {
+		t.Fatalf("gen samples = %d, want 2 (one per step)", len(tr.Recent))
+	}
+}
+
 // A canonical message for a different step does not supersede the in-flight
 // partial of another step; both rows are kept.
 func TestFoldStreamingStepMismatch(t *testing.T) {

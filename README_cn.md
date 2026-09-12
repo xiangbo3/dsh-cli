@@ -184,6 +184,7 @@ dsh-cli --thinking "solve: 1+1"         # 连思考过程也打印
 
 - **依赖**：Go 1.27+（仅构建需要）与一个运行中的 `dsh web`（默认 `http://127.0.0.1:3080`）。
 - **服务器地址**：优先级 命令行 `--url` > 环境变量 `$DSH_URL` > `~/.dsh-cli/config.json`（`{"url": "http://host:port"}`）> 内置默认；启动连不上会提示先用 `dsh web --no-open` 启动。
+- **鉴权 token（cookie 门构建）**：新版 `dsh web` 启动时会打印 launch token（`http://…/?token=…`）。用 `--token` 传入、设置 `$DSH_LAUNCH_TOKEN`、或存进 config；客户端首次接触时换取会话 cookie，后续启动直接复用（cookie 过期时自动重换一次）。老版构建无需 token。
 - **默认语言**：`~/.dsh-cli/config.json` 的 `"language"` 优先；未设置时跟随系统 locale；都不可用时回退英文。`/language` 切换会把所选语言写回配置，重启后保持。
 - **本地数据**：配置、语言文件、缓存、用量统计都在 `~/.dsh-cli` 下。
 - **许可**：[GNU GPLv3](LICENSE)。

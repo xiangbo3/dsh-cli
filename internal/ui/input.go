@@ -545,19 +545,9 @@ func (in *inputLine) caretVert(m *Model, dir int) bool {
 	if len(rows) <= 1 {
 		return false
 	}
-	// Locate the caret's physical row with render's rule: the row whose
-	// [start, start+len) contains the caret (a caret parked on a newline
-	// belongs to the row that ends at it). The rows are contiguous with
-	// a one-rune gap (the '\n') between them, so at most one matches.
-	row := -1
-	col := 0
-	for i, ln := range rows {
-		if in.cur >= ln.start && in.cur <= ln.start+len([]rune(ln.text)) {
-			row = i
-			col = in.cur - ln.start
-			break
-		}
-	}
+	// Locate the caret's physical row with render's rule (caretInLines
+	// shares it, so the arrow walk and the drawn caret agree).
+	row, col := caretInLines(rows, in.cur)
 	if row < 0 {
 		return false
 	}
@@ -879,9 +869,14 @@ func (in *inputLine) render(m *Model, width int) []string {
 	accent := th.BarAccent()
 	cursor := th.BarCursor()
 	surface := th.BarBG()
-	caretGiven := false
 	var out []string
 	lo, hi, active := in.sel.span(in.cur)
+	// The open session window owns the keyboard: its search line carries
+	// the live caret, so the main bar's caret stands down while it does.
+	cRow, cCol := -1, -1
+	if !m.sideVisible {
+		cRow, cCol = caretInLines(lines, in.cur)
+	}
 	for i, ln := range lines {
 		line := ""
 		if i == 0 {
@@ -891,12 +886,14 @@ func (in *inputLine) render(m *Model, width int) []string {
 		}
 		r := []rune(ln.text)
 		cpos := -1
-		// The open session window owns the keyboard: its search line
-		// carries the live caret, so the main bar's caret stands down.
-		if !caretGiven && !m.sideVisible &&
-			in.cur >= ln.start && in.cur <= ln.start+len(ln.text) {
-			cpos = in.cur - ln.start
-			caretGiven = true
+		if i == cRow {
+			cpos = cCol
+		}
+		if cpos == len(r) && len(r) > 0 && ind+runewidth.StringWidth(ln.text) >= width {
+			// A full row: the end-of-line caret's added cell would overrun
+			// the frame (and get clipped off) — the last char carries the
+			// cursor style instead, one cell short of the edge.
+			cpos = len(r) - 1
 		}
 		// The pick segment intersecting this physical row (render() clips
 		// it to the row the same way the renderer wraps the text).
@@ -934,31 +931,70 @@ type wline struct {
 	start int // rune index in the bar text
 }
 
+// caretInLines maps a rune index onto the physical row that carries it
+// (the row's index plus the column inside it): the row whose
+// [start, start+len) range holds the index; an index that falls in the
+// gap a wrapped row's dropped break spaces leave behind parks on the
+// previous row's end (the cursor sits where the text visually stops).
+// (-1,-1) when no row owns the index (it predates the first row, or it
+// parks off an empty line: the caret then stands down).
+func caretInLines(lines []wline, cur int) (int, int) {
+	for i, ln := range lines {
+		if cur >= ln.start && cur <= ln.start+len([]rune(ln.text)) {
+			return i, cur - ln.start
+		}
+		if i > 0 && cur < ln.start {
+			prev := lines[i-1]
+			return i - 1, len([]rune(prev.text))
+		}
+	}
+	return -1, -1
+}
+
 // wrapInputText word-wraps the bar text exactly the way render() draws
 // it: explicit newlines become line breaks, and a row that overflows the
-// usable width starts a new physical row.
+// usable width starts a new physical row. A wrapped row drops its leading
+// space(s) (the break point) — keeping them overruns the usable width by
+// a cell, and a clipped row can eat its own caret. row.start always marks
+// the first rune the row actually carries, so render's caret match and
+// indexAt's click map stay aligned with what is drawn.
 func wrapInputText(text string, usable int) []wline {
 	var lines []wline
 	var cur []rune
 	start := 0
 	ww := 0
-	for i, r := range text {
+	runeIdx := 0       // rune index of the loop position (range gives bytes)
+	dropSpace := false // a wrap break: skip the space(s) it sits on
+	for _, r := range text {
 		if r == '\n' {
 			lines = append(lines, wline{string(cur), start})
 			cur = nil
-			start = i + 1
+			start = runeIdx + 1
 			ww = 0
+			dropSpace = false
+			runeIdx++
 			continue
 		}
 		rw := runewidth.RuneWidth(r)
+		if rw < 0 {
+			rw = 0 // control runes carry no cell (runeIndexAt's rule)
+		}
 		if ww+rw > usable && len(cur) > 0 {
 			lines = append(lines, wline{string(cur), start})
 			cur = nil
-			start = i
+			start = runeIdx
 			ww = 0
+			dropSpace = true
 		}
+		if dropSpace && r == ' ' {
+			start = runeIdx + 1
+			runeIdx++
+			continue
+		}
+		dropSpace = false
 		cur = append(cur, r)
 		ww += rw
+		runeIdx++
 	}
 	lines = append(lines, wline{string(cur), start})
 	return lines

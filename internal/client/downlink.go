@@ -24,18 +24,26 @@ type DownlinkFrame struct {
 	Raw     []byte
 }
 
-// Stream is the dual downlink (events.mux + events.host). Both sockets are
+// Stream is the downlink of one DSH web server. The legacy build speaks
+// it as the dual events.mux + events.host sockets; the cookie-gated
+// build as the single multiplexed remote.mux socket. Both sockets are
 // downlink-only; upstream traffic stays on HTTP. Stream delivers decoded
-// frames on Frames() and connectivity on Status(). On any socket death both
-// are re-dialed and Status emits false, so callers re-baseline (refetch
-// session.list + history tail) and resume.
+// frames on Frames() and connectivity on Status(). On any socket death
+// the downlink re-dials and Status emits false, so callers re-baseline
+// (refetch session.list + history tail) and resume.
 //
 // Drops pulses when the consumer was too slow for more than dropWatch
 // consecutive frames (a GC pause or a blocked pump): the loss is repaired
 // by a re-baseline, not by replay.
 type Stream struct {
-	muxURL  string
-	hostURL string
+	base     string
+	wsBase   string
+	origin   string // the truthful Origin of the ws dial (scheme://authority)
+	conn     *Conn  // shared per-base state (dialect, cookie, host facts)
+	http     *http.Client
+	mux      *muxStream // live remote.mux epoch (new dialect; nil between)
+	followMu sync.Mutex
+	follows  map[string]FollowAddr
 
 	frames  chan DownlinkFrame
 	status  chan bool
@@ -51,10 +59,21 @@ const dropWatch = 8
 
 // NewStream builds a stream for the given base URL (http or https).
 func NewStream(base string) *Stream {
-	wsBase := strings.NewReplacer("https://", "wss://", "http://", "ws://").Replace(strings.TrimRight(base, "/"))
+	b := trimBase(base)
+	wsBase := strings.NewReplacer("https://", "wss://", "http://", "ws://").Replace(b)
+	scheme := "https"
+	if strings.HasPrefix(b, "http://") {
+		scheme = "http"
+	}
+	host := strings.TrimPrefix(wsBase, "wss://")
+	host = strings.TrimPrefix(host, "ws://")
 	return &Stream{
-		muxURL:  wsBase + protocol.StreamMux,
-		hostURL: wsBase + protocol.StreamHost,
+		base:    b,
+		wsBase:  wsBase,
+		origin:  scheme + "://" + host,
+		conn:    ConnFor(b),
+		http:    &http.Client{Timeout: 5 * time.Second},
+		follows: map[string]FollowAddr{},
 		frames:  make(chan DownlinkFrame, 256),
 		status:  make(chan bool, 8),
 		drops:   make(chan struct{}, 1),
@@ -76,11 +95,41 @@ func (s *Stream) Start(ctx context.Context) {
 	go s.loop(ctx)
 }
 
+// loop settles the build generation (one unauthenticated probe; a failed
+// probe just re-enters the ladder) and hands off to the dialect's
+// reconnect loop.
 func (s *Stream) loop(ctx context.Context) {
 	var backoff time.Duration
 	for {
-		mux, errMux := s.dial(ctx, s.muxURL)
-		host, errHost := s.dial(ctx, s.hostURL)
+		d, err := s.dialect(ctx)
+		if err == nil {
+			if d == DialectNew {
+				s.muxLoop(ctx)
+			} else {
+				s.legacyLoop(ctx)
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		backoff = nextBackoff(backoff)
+		s.emitStatus(false)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+	}
+}
+
+func (s *Stream) legacyLoop(ctx context.Context) {
+	var backoff time.Duration
+	for {
+		mux, errMux := s.dial(ctx, s.wsBase+protocol.StreamMux)
+		host, errHost := s.dial(ctx, s.wsBase+protocol.StreamHost)
 		if mux == nil && host == nil {
 			select {
 			case <-ctx.Done():

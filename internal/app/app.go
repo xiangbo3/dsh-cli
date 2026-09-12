@@ -8,6 +8,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"dsh-cli/internal/client"
+	"dsh-cli/internal/config"
 	"dsh-cli/internal/core"
 	"dsh-cli/internal/i18n"
 	"dsh-cli/internal/protocol"
@@ -26,6 +28,12 @@ type App struct {
 	cli *client.Client
 	dl  *client.Stream
 	st  *core.Store
+
+	// followed tracks the transcript the cookie-gated downlink follows
+	// (the focus hook un-follows it when the focus moves; no-op on the
+	// legacy build, whose mux follows by subscription).
+	followMu sync.Mutex
+	followed string
 
 	// usage is the persistent token-usage recorder (~/.dsh-cli); nil
 	// when not attached (the statistics stay off, the app is unaffected).
@@ -49,11 +57,45 @@ type App struct {
 
 // New builds an App for base (e.g. "http://127.0.0.1:3080").
 func New(base string) *App {
-	return &App{
+	return NewWith(base, "")
+}
+
+// NewWith is New with an explicit launch token ("" falls through to the
+// stored token): the cookie-gated web build's boot credential, in
+// precedence order flag > environment (merged by the caller) > config.
+func NewWith(base, token string) *App {
+	a := &App{
 		cli: client.New(base),
 		dl:  client.NewStream(base),
 		st:  core.NewStore(base),
 	}
+	a.wireAuth(base, token)
+	return a
+}
+
+// wireAuth installs the shared connection credentials: the launch token
+// (explicit, else stored) and the stored cookie when it binds to this
+// base; a successful exchange persists token + cookie back to the
+// config.
+func (a *App) wireAuth(base, token string) {
+	conn := a.cli.Conn()
+	c := config.Load()
+	if token == "" {
+		token = c.Token
+	}
+	if token != "" {
+		conn.SetToken(token)
+	}
+	if c.Cookie != "" && client.TrimBase(c.CookieFor) == a.cli.BaseURL() {
+		conn.SetCookie(c.Cookie)
+	}
+	conn.SetCookieSaver(func(tok, cookie string) {
+		c := config.Load()
+		c.Token = tok
+		c.Cookie = cookie
+		c.CookieFor = a.cli.BaseURL()
+		_ = config.Save(c)
+	})
 }
 
 // Client exposes the raw RPC facade (for commands without a wrapper).
@@ -100,9 +142,11 @@ func (a *App) usageWorkspaceKey(sid string) string {
 
 // recordUsage folds one assistant event's token usage into the persistent
 // statistics; the fold already parsed the payload, so no second decode here
-// (nil-safe: a recorder-less app simply doesn't count).
+// (nil-safe: a recorder-less app simply doesn't count). A
+// projection-managed session is skipped: its host baselines already
+// include the event's usage.
 func (a *App) recordUsage(sid string, ev *protocol.SessionEvent, usage *protocol.TokenUsage) {
-	if a.usage == nil || ev == nil || usage == nil {
+	if a.usage == nil || ev == nil || usage == nil || a.usage.ProjectionManaged(sid) {
 		return
 	}
 	a.usage.Record(sid, a.usageWorkspaceKey(sid), ev.Time, ev.Seq, usage)
@@ -110,9 +154,11 @@ func (a *App) recordUsage(sid string, ev *protocol.SessionEvent, usage *protocol
 
 // recordPageUsage folds a history page's assistant usage (the same
 // events the transcript will absorb — idempotent by seq, so the live
-// and history paths never double-count).
+// and history paths never double-count). Projection-managed sessions
+// are skipped outright: the tail's host baseline already covers the
+// page's messages.
 func (a *App) recordPageUsage(id string, events []protocol.HistoryEntry) {
-	if a.usage == nil {
+	if a.usage == nil || a.usage.ProjectionManaged(id) {
 		return
 	}
 	for i := range events {
@@ -132,6 +178,22 @@ func (a *App) recordPageUsage(id string, events []protocol.HistoryEntry) {
 func (a *App) Start(ctx context.Context) *core.Store {
 	a.ctx = ctx
 	a.dl.Start(ctx)
+	// Point the cookie-gated transcript follow at the focused session
+	// (the legacy build's mux follows by subscription; the hook is a
+	// cheap no-op there).
+	focus := func(id string) {
+		a.unfollowFocus()
+		if id != "" {
+			a.dl.Follow(client.FollowAddr{Kind: "session", SessionId: id})
+			a.followMu.Lock()
+			a.followed = id
+			a.followMu.Unlock()
+		}
+	}
+	a.st.SetActiveChanged(focus)
+	if id := a.st.Active(); id != "" {
+		focus(id)
+	}
 	go a.pumpFrames(ctx)
 	go a.pumpStatus(ctx)
 	go a.pumpDrops(ctx)
@@ -144,14 +206,50 @@ func (a *App) Start(ctx context.Context) *core.Store {
 	return a.st
 }
 
+// unfollowFocus drops the current focus follow (the hook fires for every
+// focus change, including a clear to "").
+func (a *App) unfollowFocus() {
+	a.followMu.Lock()
+	id := a.followed
+	a.followed = ""
+	a.followMu.Unlock()
+	if id != "" {
+		a.dl.Unfollow(client.FollowAddr{Kind: "session", SessionId: id})
+	}
+}
+
+// FollowSubagent opens one child transcript's follow stream (the
+// cookie-gated build follows no transcript until asked; the legacy build
+// no-ops).
+func (a *App) FollowSubagent(parent, child, mode string) {
+	a.dl.Follow(client.FollowAddr{Kind: "subagent", ParentSessionId: parent, ChildSessionId: child, Mode: mode})
+}
+
+// UnfollowSubagent closes one child transcript's follow stream.
+func (a *App) UnfollowSubagent(child string) {
+	a.dl.Unfollow(client.FollowAddr{Kind: "subagent", ChildSessionId: child})
+}
+
 // probe retries host.describe until it succeeds (server not up yet / just
 // restarted). The UI renders off Store.Host() + Connected().
 func (a *App) baseline(ctx context.Context, initial bool) {
+	// A cookie-gated host that rejects the held (or missing) token
+	// answers every probe with an auth-required 401: surface the fix
+	// once instead of retrying into silence.
+	authNoted := false
 	for {
 		h, err := a.cli.Describe(ctx)
 		if err == nil {
 			a.st.SetHost(h)
 			break
+		}
+		if !authNoted && errors.Is(err, client.ErrAuthRequired) {
+			key := "auth.needed"
+			if errors.Is(err, client.ErrTokenRejected) {
+				key = "auth.stale" // host restarted with a fresh token
+			}
+			authNoted = true
+			a.st.Notify(core.Notice{Level: "err", Text: i18n.LoadDefault().T(key)})
 		}
 		select {
 		case <-ctx.Done():
@@ -177,8 +275,35 @@ func (a *App) RefreshRoster(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("session.list: %w", err)
 	}
+	a.reconcileRosterUsage(resp.Items)
 	a.st.SetSessions(resp.Items)
 	return nil
+}
+
+// reconcileRosterUsage confirms the roster rows' tokenUsage baselines
+// (each row's cumulative session total as of its asOfSeq): one
+// session.list keeps every session's statistics at the host's totals —
+// including sessions the TUI never loaded. Rows without a baseline
+// (old hosts) fall back to per-event counting as before.
+func (a *App) reconcileRosterUsage(items []protocol.SessionSummary) {
+	if a.usage == nil {
+		return
+	}
+	for i := range items {
+		it := &items[i]
+		if len(it.Projections) == 0 {
+			continue
+		}
+		var pb protocol.ProjectionsBlock
+		if json.Unmarshal(it.Projections, &pb) != nil || pb.AsOfSeq <= 0 {
+			continue
+		}
+		tu := tokenUsageBaseline(pb.Values)
+		if tu == nil {
+			continue
+		}
+		a.recordProjectionBaseline(it.SessionId, pb.AsOfSeq, tu)
+	}
 }
 
 // RefreshWorkspaces fetches the workspace registry baseline (the reconnect
@@ -236,6 +361,49 @@ func (a *App) LoadActiveTail(ctx context.Context) {
 	a.LoadTail(ctx, id)
 }
 
+// recordProjectionBaseline confirms one host tokenUsage baseline (the
+// session's cumulative total as of seq) with the persistent statistics;
+// the recorder counts only the advance over the session's previous
+// baseline, so the live pushes, tail pages and roster rows can all
+// confirm freely without double-counting.
+func (a *App) recordProjectionBaseline(sid string, seq int64, tu *protocol.TokenUsageHost) {
+	if a.usage == nil || sid == "" || seq <= 0 || tu == nil {
+		return
+	}
+	a.usage.RecordProjection(sid, a.usageWorkspaceKey(sid), 0, seq, tu)
+}
+
+// tokenUsageBaseline extracts the tail page's (or a roster row's)
+// host tokenUsage baseline (nil when the host sent no projection —
+// old builds fall back to per-event counting).
+func tokenUsageBaseline(v map[string]json.RawMessage) *protocol.TokenUsageHost {
+	raw, ok := v["tokenUsage"]
+	if !ok {
+		return nil
+	}
+	var tu protocol.TokenUsageHost
+	if json.Unmarshal(raw, &tu) != nil {
+		return nil
+	}
+	return &tu
+}
+
+// recordTailProjections confirms the tail page's host baseline (the
+// cumulative total as of the page's asOfSeq, the in-flight step's
+// sample included). It reports whether the page carried a baseline —
+// only then does the page's per-event accounting stay off.
+func (a *App) recordTailProjections(id string, resp *protocol.HistoryResponse) bool {
+	if resp == nil || resp.Projections == nil {
+		return false
+	}
+	tu := tokenUsageBaseline(resp.Projections.Values)
+	if tu == nil || resp.Projections.AsOfSeq <= 0 {
+		return false
+	}
+	a.recordProjectionBaseline(id, resp.Projections.AsOfSeq, tu)
+	return true
+}
+
 // LoadTail fetches and applies one history tail page.
 func (a *App) LoadTail(ctx context.Context, id string) {
 	resp, err := a.cli.History(ctx, id, 0, historyPageSize)
@@ -243,8 +411,25 @@ func (a *App) LoadTail(ctx context.Context, id string) {
 		a.st.Notify(core.Notice{Level: "err", Text: id + " history: " + err.Error()})
 		return
 	}
-	a.recordPageUsage(id, resp.Events)
+	if !a.recordTailProjections(id, resp) {
+		a.recordPageUsage(id, resp.Events)
+	}
 	a.st.LoadTail(id, resp)
+}
+
+// ReconcileUsage re-pulls the session's tail page and confirms its host
+// tokenUsage baseline — the /status modal's live refresh: between step
+// boundaries the baseline is the only signal that carries the in-flight
+// step's sample, and the confirm counts only its advance.
+func (a *App) ReconcileUsage(ctx context.Context, id string) {
+	if a.usage == nil || id == "" {
+		return
+	}
+	resp, err := a.cli.History(ctx, id, 0, historyPageSize)
+	if err != nil {
+		return
+	}
+	a.recordTailProjections(id, resp)
 }
 
 // LoadOlder fetches the page before the given seq.
@@ -646,8 +831,35 @@ func (a *App) handleFrame(ctx context.Context, fr client.DownlinkFrame) {
 		}
 	case protocol.FMuxProjection:
 		v, err := protocol.DecodeMuxProjection(fr.Payload)
-		if err == nil {
-			a.st.MuxProjection(v.SessionId, v.Key, v.Seq, v.Value)
+		if err != nil {
+			return
+		}
+		a.st.MuxProjection(v.SessionId, v.Key, v.Seq, v.Value)
+		if v.Key == "tokenUsage" {
+			// The step just sampled: confirm the cumulative baseline —
+			// the recorder counts only its advance over the previous
+			// one, so this is the in-flight step's tokens landing in
+			// the persistent statistics.
+			tu := tokenUsageBaseline(map[string]json.RawMessage{"tokenUsage": v.Value})
+			if tu != nil {
+				a.recordProjectionBaseline(v.SessionId, v.Seq, tu)
+			}
+		}
+	case protocol.FMuxActivity:
+		var v struct {
+			SessionId string `json:"sessionId"`
+			UpdatedAt int64  `json:"updatedAt"`
+		}
+		if json.Unmarshal(fr.Payload, &v) == nil {
+			a.st.TouchActivity(v.SessionId, v.UpdatedAt)
+		}
+	case protocol.FMuxPresetSelected:
+		var v struct {
+			SessionId   string `json:"sessionId"`
+			AgentPreset string `json:"agentPreset"`
+		}
+		if json.Unmarshal(fr.Payload, &v) == nil {
+			a.st.SetAgentPreset(v.SessionId, v.AgentPreset)
 		}
 	case protocol.FStreamError:
 		v, err := protocol.DecodeStreamError(fr.Payload)

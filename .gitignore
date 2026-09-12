@@ -13,3 +13,6 @@
 # scratch
 *.log
 
+# git
+/.git/
+/.gitignore

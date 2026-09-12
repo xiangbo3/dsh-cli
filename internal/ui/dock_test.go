@@ -6,6 +6,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -385,5 +386,147 @@ func TestSubTranscriptEscClose(t *testing.T) {
 	upd(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.topModal() != nil {
 		t.Fatalf("esc left the child window open: %T", m.topModal())
+	}
+}
+
+// TestSubModalScroll pins the child window's scroll: the page is longer
+// than the popup body, so the window opens on the first lines and walks
+// with the arrows, the page keys, home/end, and the mouse wheel — which
+// must not scroll the transcript behind the open window.
+func TestSubModalScroll(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	fh := newFakeHost(t)
+	// 30 user messages plus their turn ends: 60 page lines, more than
+	// double the 16-row popup body the 30-row model renders.
+	var events []protocol.HistoryEntry
+	for i := 0; i < 30; i++ {
+		events = append(events,
+			protocol.HistoryEntry{Event: protocol.SessionEvent{Type: "user/message", Seq: int64(2*i + 1), Data: json.RawMessage(
+				fmt.Sprintf(`{"role":"user","content":[{"type":"text","text":"msg-%02d"}]}`, i))}},
+			protocol.HistoryEntry{Event: protocol.SessionEvent{Type: "turn/end", Seq: int64(2*i + 2), Data: json.RawMessage(`{}`)}},
+		)
+	}
+	fh.subagents = []protocol.SubagentListEntry{{
+		Kind: "child", Id: "c1", Mode: "continuable", Activity: "running",
+		Label: "probe child",
+	}}
+	fh.histories["c1"] = events
+	// The host roster carries the session: the async boot baseline's
+	// session.list must not clobber the store's session row.
+	fh.sessions = []protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp/x"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	a := app.New(fh.URL)
+	a.Start(ctx)
+	t.Setenv("DSH_CLI_HOME", t.TempDir())
+	m := NewModel(a)
+	m.W, m.H = 120, 30
+	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp/x"}})
+	m.st.SetActive("s1")
+	// Transcript content behind the window: the wheel must not move it
+	// while the modal is open.
+	var main []protocol.HistoryEntry
+	for i := 0; i < 30; i++ {
+		main = append(main, protocol.HistoryEntry{Event: protocol.SessionEvent{Type: "assistant/message", Seq: int64(i + 1), Data: json.RawMessage(
+			fmt.Sprintf(`{"turn":1,"step":%d,"message":{"role":"assistant","content":[{"type":"text","text":"main-%02d"}]}}`, i+1, i))}})
+	}
+	m.st.LoadTail("s1", &protocol.HistoryResponse{Events: main})
+
+	m.dockVisible = true
+	m.dockTab = dockSubs
+	var cmd tea.Cmd
+	upd := func(msg tea.Msg) {
+		nv, c := m.Update(msg)
+		m = nv.(*Model)
+		cmd = c
+	}
+	if c := m.subDockRefresh(); c != nil {
+		upd(c()) // the child catalog lands before the window can open
+	}
+	upd(tea.KeyMsg{Type: tea.KeyEnter}) // opens the window, schedules the page fetch
+	if cmd == nil {
+		t.Fatal("history fetch not scheduled on open")
+	}
+	upd(cmd())
+	sm, ok := m.topModal().(*subagentModal)
+	if !ok || sm.loading || len(sm.lines) != 60 {
+		t.Fatalf("window state = %T loading=%v lines=%d, want the 60-line page", m.topModal(), sm.loading, len(sm.lines))
+	}
+
+	// shown returns the msg lines visible in the window, in order.
+	shown := func() []string {
+		out := stripANSI(m.View())
+		var s []string
+		for i := 0; i < 30; i++ {
+			if mark := fmt.Sprintf("msg-%02d", i); strings.Contains(out, mark) {
+				s = append(s, mark)
+			}
+		}
+		return s
+	}
+	first := func(s []string) string {
+		if len(s) == 0 {
+			t.Fatal("window shows no lines")
+		}
+		return s[0]
+	}
+
+	// 1) The window opens on the first lines: the page head is visible,
+	//    the page tail is not (16 rows cannot hold 60 lines).
+	if s := shown(); first(s) != "msg-00" || strings.Contains(strings.Join(s, " "), "msg-29") {
+		t.Fatalf("initial window = %v, want the page head only", s)
+	}
+
+	// 2) Down arrows walk one line at a time.
+	upd(tea.KeyMsg{Type: tea.KeyDown})
+	upd(tea.KeyMsg{Type: tea.KeyDown})
+	if s := shown(); first(s) != "msg-01" {
+		t.Fatalf("after two downs first = %s (window = %v), want msg-01", first(s), s)
+	}
+
+	// 3) Page down moves a full window (vis-1 lines); page up walks back.
+	upd(tea.KeyMsg{Type: tea.KeyPgDown})
+	if s := shown(); first(s) != "msg-09" {
+		t.Fatalf("after pgdown first = %s (window = %v), want msg-09", first(s), s)
+	}
+	upd(tea.KeyMsg{Type: tea.KeyPgUp})
+	if s := shown(); first(s) != "msg-01" {
+		t.Fatalf("after pgup first = %s, want msg-01 (the pre-pgdown seat)", first(s))
+	}
+
+	// 4) End jumps to the page tail, home back to the head.
+	upd(tea.KeyMsg{Type: tea.KeyEnd})
+	if s := shown(); !strings.Contains(strings.Join(s, " "), "msg-29") || first(s) != "msg-22" {
+		t.Fatalf("after end window = %v, want the page tail (msg-29 visible)", s)
+	}
+	upd(tea.KeyMsg{Type: tea.KeyHome})
+	if s := shown(); first(s) != "msg-00" {
+		t.Fatalf("after home first = %s, want msg-00", first(s))
+	}
+
+	// 5) The wheel scrolls the window, not the transcript behind it.
+	scBefore := m.scroll
+	upd(tea.MouseMsg{Button: tea.MouseButtonWheelDown, X: 10, Y: 10})
+	if m.scroll != scBefore {
+		t.Fatalf("wheel with the window open moved the transcript: %d -> %d", scBefore, m.scroll)
+	}
+	if s := shown(); first(s) != "msg-02" {
+		t.Fatalf("after wheel down first = %s (window = %v), want msg-02", first(s), s)
+	}
+	for i := 0; i < 3; i++ {
+		upd(tea.MouseMsg{Button: tea.MouseButtonWheelUp, X: 10, Y: 10})
+	}
+	if s := shown(); first(s) != "msg-00" {
+		t.Fatalf("wheel up past the head: first = %s, want msg-00 (clamped)", first(s))
+	}
+
+	// 6) Closed, the wheel belongs to the transcript again.
+	upd(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.topModal() != nil {
+		t.Fatal("esc left the window open")
+	}
+	upd(tea.MouseMsg{Button: tea.MouseButtonWheelDown, X: 10, Y: 10})
+	if m.scroll == scBefore {
+		t.Fatalf("wheel with no modal left the transcript at %d", m.scroll)
 	}
 }

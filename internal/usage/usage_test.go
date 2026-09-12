@@ -199,6 +199,87 @@ func TestSeqTrim(t *testing.T) {
 	}
 }
 
+func hostTok(in, out, cr, cw int) *protocol.TokenUsageHost {
+	return &protocol.TokenUsageHost{In: in, Out: out, CR: cr, CW: cw}
+}
+
+func TestRecordProjectionBaselines(t *testing.T) {
+	r := New(filepath.Join(t.TempDir(), "usage.json"))
+	// The first baseline counts the cumulative in full (the session has
+	// no per-event record yet).
+	if !r.RecordProjection("s1", "w1", 1000, 10, hostTok(100, 10, 50, 0)) {
+		t.Fatal("first baseline should count")
+	}
+	// The next baseline counts only the advance over the previous one.
+	if !r.RecordProjection("s1", "w1", 2000, 20, hostTok(160, 30, 150, 5)) {
+		t.Fatal("advanced baseline should count its advance")
+	}
+	// A re-delivered seq is a no-op; a stale lower-seq baseline is too
+	// (the cumulative is monotone in seq).
+	if r.RecordProjection("s1", "w1", 3000, 20, hostTok(900, 900, 900, 900)) {
+		t.Fatal("re-delivered baseline counted twice")
+	}
+	if r.RecordProjection("s1", "w1", 3000, 15, hostTok(900, 900, 900, 900)) {
+		t.Fatal("stale baseline counted")
+	}
+	rep := r.Report(time.Now())
+	if rep.Total.In != 160 || rep.Total.Out != 30 || rep.Total.CR != 150 || rep.Total.CW != 5 {
+		t.Fatalf("total = %+v, want the final cumulative", rep.Total)
+	}
+	if !r.ProjectionManaged("s1") || r.ProjectionManaged("s2") {
+		t.Fatal("managed flags wrong")
+	}
+}
+
+func TestRecordProjectionRepairsPerEventTotals(t *testing.T) {
+	r := New(filepath.Join(t.TempDir(), "usage.json"))
+	// Per-event counting already recorded part of the session's
+	// canonicals (what the old scheme would have on disk).
+	if !r.Record("s1", "w1", 1000, 7, &protocol.TokenUsage{InputTokens: 40, OutputTokens: 4}) {
+		t.Fatal("per-event record should count")
+	}
+	// The first host baseline counts only the difference — the
+	// already-recorded part must not count again.
+	if !r.RecordProjection("s1", "w1", 2000, 30, hostTok(100, 20, 80, 0)) {
+		t.Fatal("first baseline over per-event totals should count the difference")
+	}
+	rep := r.Report(time.Now())
+	if rep.Total.In != 100 || rep.Total.Out != 20 || rep.Total.CR != 80 {
+		t.Fatalf("total = %+v, want exactly the host cumulative (no double count)", rep.Total)
+	}
+	if !r.ProjectionManaged("s1") {
+		t.Fatal("session should be projection-managed")
+	}
+	// Subsequent baselines continue from the last confirmed value.
+	if !r.RecordProjection("s1", "w1", 3000, 40, hostTok(150, 25, 200, 0)) {
+		t.Fatal("second baseline should count its advance")
+	}
+	rep = r.Report(time.Now())
+	if rep.Total.In != 150 || rep.Total.Out != 25 || rep.Total.CR != 200 {
+		t.Fatalf("total = %+v, want the new cumulative", rep.Total)
+	}
+}
+
+func TestRecordProjectionPersistence(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "usage.json")
+	r := New(p)
+	r.RecordProjection("s1", "w1", 1000, 10, hostTok(100, 10, 50, 0))
+	r.Close()
+	r2 := New(p)
+	// The baseline survived the round trip: a re-delivered same-seq
+	// value is a no-op; the next seq counts only the advance.
+	if r2.RecordProjection("s1", "w1", 2000, 10, hostTok(100, 10, 50, 0)) {
+		t.Fatal("reloaded baseline re-counted")
+	}
+	if !r2.RecordProjection("s1", "w1", 2000, 20, hostTok(120, 15, 60, 0)) {
+		t.Fatal("advance past a reloaded baseline should count")
+	}
+	rep := r2.Report(time.Now())
+	if rep.Total.In != 120 || rep.Total.Out != 15 || rep.Total.CR != 60 {
+		t.Fatalf("total = %+v, want the cumulative", rep.Total)
+	}
+}
+
 func TestZeroAndNilUsage(t *testing.T) {
 	r := New(filepath.Join(t.TempDir(), "usage.json"))
 	if r.Record("s", "w", 1, 1, nil) {

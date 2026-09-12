@@ -15,21 +15,27 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"strings"
+	"syscall"
+	"time"
 
 	"dsh-cli/internal/app"
 	"dsh-cli/internal/client"
 	"dsh-cli/internal/config"
+	"dsh-cli/internal/core"
 	"dsh-cli/internal/i18n"
 	"dsh-cli/internal/oneoff"
 	"dsh-cli/internal/ui"
 	"dsh-cli/internal/usage"
 	"dsh-cli/internal/version"
+	"dsh-cli/internal/webhost"
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
@@ -54,6 +60,50 @@ func main() {
 	defer cancel()
 
 	cmd, rest := splitCommand(pos)
+	// Dsh web lifecycle: a down loopback host is launched (token captured
+	// and stored); a live host that rejects the held credentials is killed
+	// and relaunched. The server persists after dsh-cli exits.
+	//
+	// The TUI boots alongside the launch: a slow (or token-less, old)
+	// dsh web must not hold the first frame — the splash covers the gap,
+	// and the outcome lands on resCh for runTUI to apply. One-shot
+	// commands wait for it synchronously: their first RPC needs the
+	// credentials already.
+	var wh *webhost.Host
+	var tok string
+	var resCh chan webhost.Result
+	if cmd == "" && len(rest) == 0 {
+		resCh = make(chan webhost.Result, 1)
+		go func() {
+			h, tk, err := webhost.Connect(o.URL, o.Token, !o.NoAutostart)
+			resCh <- webhost.Result{Host: h, Token: tk, Err: err}
+		}()
+	} else {
+		var err error
+		wh, tok, err = webhost.Connect(o.URL, o.Token, !o.NoAutostart)
+		if err != nil {
+			fatalf("webhost: %v", err)
+		}
+		if wh != nil {
+			o.Token = tok // the launched/restarted host owns this token
+			key := "webhost.launched"
+			if wh.Restarted() {
+				key = "webhost.restarted"
+			}
+			fmt.Fprintf(os.Stderr, "note: %s\n", i18n.LoadDefault().T(key, wh.Pid(), wh.Base()))
+		}
+	}
+	// Signal routing: interrupts (Ctrl-C, kill, pty close) cancel the app
+	// context so every flow finishes its normal exit path (the auto-started
+	// web persists — the child is re-parented). A second signal force-exits.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sigCh
+		cancel()
+		<-sigCh
+		os.Exit(130)
+	}()
 	switch cmd {
 	case "status":
 		must(oneoff.Status(ctx, o))
@@ -83,7 +133,7 @@ func main() {
 		runOneShot(ctx, o, strings.Join(rest, " "))
 	case "":
 		if len(rest) == 0 {
-			runTUI(ctx, o)
+			runTUI(ctx, o, resCh)
 		} else {
 			runOneShot(ctx, o, strings.Join(rest, " "))
 		}
@@ -121,10 +171,12 @@ func registerFlags(o *oneoff.Opts) {
 		fs.PrintDefaults()
 	}
 	fs.StringVar(&o.URL, "url", envOr("DSH_URL", config.ResolveURL("")), "server base URL (precedence: flag > $DSH_URL > ~/.dsh-cli/config.json > "+config.DefaultURL+")")
+	fs.StringVar(&o.Token, "token", envOr("DSH_LAUNCH_TOKEN", ""), "launch token the cookie-gated dsh web printed at startup (precedence: flag > $DSH_LAUNCH_TOKEN > stored; the exchanged cookie is stored for later boots)")
 	fs.StringVar(&o.SessionID, "session", "", "target session id")
 	fs.StringVar(&o.CWD, "cwd", "", "workspace cwd for new sessions (default: host cwd)")
 	fs.StringVar(&o.Preset, "preset", "", "agent preset for new sessions")
 	fs.BoolVar(&o.New, "new", false, "always create a new session")
+	fs.BoolVar(&o.NoAutostart, "no-autostart", false, "do not auto-start a down loopback dsh web (default: launch it as a child and stop it with dsh-cli)")
 	fs.BoolVar(&o.Verbose, "v", false, "one-shot: print tool calls and stream text live")
 	fs.BoolVar(&o.Thinking, "thinking", false, "one-shot: also print reasoning blocks")
 	fs.DurationVar(&o.Timeout, "timeout", oneoff.DefaultTimeout, "one-shot wait timeout")
@@ -136,7 +188,7 @@ func registerFlags(o *oneoff.Opts) {
 func reorderFlags(args []string) []string {
 	isValueFlag := func(name string) bool {
 		switch name {
-		case "url", "session", "cwd", "preset", "timeout":
+		case "url", "token", "session", "cwd", "preset", "timeout":
 			return true
 		}
 		return false
@@ -166,12 +218,45 @@ func reorderFlags(args []string) []string {
 	return append(flags, rest...)
 }
 
-func runTUI(ctx context.Context, o oneoff.Opts) {
+// exit is os.Exit for the post-boot paths. The auto-started dsh web
+// PERSISTS across dsh-cli exits (its stdio rides a log file, not
+// dsh-cli's pipes, so re-parenting is safe); defers are skipped by
+// os.Exit, so the exit paths are explicit.
+func exit(code int) {
+	os.Exit(code)
+}
+
+func runTUI(ctx context.Context, o oneoff.Opts, resCh <-chan webhost.Result) {
 	if err := o.Fill(); err != nil {
 		fatalf("%v", err)
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	a.Start(ctx)
+	if resCh != nil {
+		// The launch runs alongside the boot: apply its outcome when it
+		// lands — install the fresh token (the baseline probe picks it up
+		// on its next pass) and toast the launch line, or the boot error.
+		// Boot-grade hint life: the default 4s toast would expire while
+		// the splash still owns the screen.
+		go func() {
+			r := <-resCh
+			if r.Err != nil {
+				a.Store().Notify(core.Notice{Level: "err", Text: "webhost: " + r.Err.Error(), Life: 10 * time.Second})
+				return
+			}
+			if r.Host == nil {
+				return // already live, or autostart off: nothing to install
+			}
+			if r.Token != "" {
+				a.Client().Conn().SetToken(r.Token)
+			}
+			key := "webhost.launched"
+			if r.Host.Restarted() {
+				key = "webhost.restarted"
+			}
+			a.Store().Notify(core.Notice{Level: "info", Text: i18n.LoadDefault().T(key, r.Host.Pid(), r.Host.Base()), Life: 10 * time.Second})
+		}()
+	}
 	// Persistent token-usage statistics (~/.dsh-cli/usage.json): the
 	// /status popup's data; best-effort, off when home is unresolvable.
 	if p, ok := usage.DefaultPath(); ok {
@@ -194,7 +279,7 @@ func runTUI(ctx context.Context, o oneoff.Opts) {
 			fmt.Fprintf(os.Stderr, "dsh-cli panicked: %v\n", r)
 			debug.PrintStack()
 			fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?25h") // leave alt-screen, show cursor
-			os.Exit(1)
+			exit(1)
 		}
 	}()
 	if _, err := prog.Run(); err != nil {
@@ -228,11 +313,12 @@ func runOneShot(ctx context.Context, o oneoff.Opts, prompt string) {
 	if _, err := oneoff.Run(cctx, o, prompt); err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			fmt.Fprintf(os.Stderr, "timed out after %s\n", o.Timeout)
-			os.Exit(3)
+			exit(3)
 		}
 		fmt.Fprintln(os.Stderr, err)
+		authHint(err)
 		hostDown(err)
-		os.Exit(1)
+		exit(1)
 	}
 }
 
@@ -241,6 +327,20 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// authHint prints the recovery line under an auth-required failure:
+// the cookie-gated host refused the held (or missing) token, and the
+// two causes point at different fixes.
+func authHint(err error) {
+	if !errors.Is(err, client.ErrAuthRequired) {
+		return
+	}
+	key := "auth.needed"
+	if errors.Is(err, client.ErrTokenRejected) {
+		key = "auth.stale"
+	}
+	fmt.Fprintln(os.Stderr, i18n.LoadDefault().T(key))
 }
 
 // hostDown prints the "start the server" hint under a transport-level
@@ -259,11 +359,12 @@ func must(err error) {
 		return
 	}
 	fmt.Fprintln(os.Stderr, err)
+	authHint(err)
 	hostDown(err)
-	os.Exit(1)
+	exit(1)
 }
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
+	exit(1)
 }

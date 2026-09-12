@@ -1,5 +1,228 @@
 # Changelog
 
+## 1.0.46
+
+### Added
+
+- Compatibility with the cookie-gated dsh web build: the launch token the
+  server prints at boot (`http://…/?token=…`) is exchanged for a session
+  cookie on first contact; subsequent requests ride the cookie. Precedence:
+  `--token` flag > `DSH_LAUNCH_TOKEN` env > the token stored in config.
+  The exchanged cookie is stored with its minting host and re-applied on
+  later boots (skipped when the base URL changed); a stale cookie clears
+  with one re-exchange + retry.
+- `--token` flag (all commands), wired to the one-shot and TUI paths.
+- Legacy builds keep working unchanged: the dialect is probed once per
+  host (a 401 index = cookie-gated, a 200 index = legacy).
+
+- Cold-host auto-start: when the configured loopback dsh web is not
+  running, dsh-cli now launches `dsh web --no-open` itself (same
+  host/port as the configured URL), captures the `?token=…` line the
+  server prints, stores the token in the config, and shuts the child
+  down when dsh-cli exits — on every exit path, including the
+  `os.Exit` ones. A dsh web that was already running is left alone
+  (never killed). `--no-autostart` or `$DSH_NO_AUTOSTART=1` opts out;
+  `$DSH_BIN` names a non-PATH dsh launcher. A non-loopback base URL is
+  never auto-started, and a merely slow (timing out) host is not
+  relaunched.
+
+- Token price setting in /status: a new "billing" tab (the 4th section,
+  reached with → / tab / 4) edits the input and output cost per one
+  million tokens in two fields (↑↓ switches between them); a valid edit
+  applies at once — no enter to confirm, a half-typed state ("2.") waits
+  for the next digit, and a blank field clears. Once set, the cost
+  follows every token count in the popup ("1.2M in / 400.4K out (133)").
+- The status bar's generation rate ("… · 70t/s") is the server's recent
+  generation average and stays displayed once a session has generated
+  anything: an idle session keeps showing the last rate instead of the
+  readout going off.
+
+### Changed
+
+- Single multiplexed downlink `/api/remote.mux` on the new build (the
+  legacy dual-socket downlink is untouched): session events, queue/job
+  control, and the workspace registry all arrive over one socket and are
+  re-emitted into the existing internal frame stream, so the UI and store
+  see no new protocol.
+- Approvals and user questions now answer over the `$events` result
+  channel (`/api/$events/result`) on the new build, keyed by the
+  $events client id and the frame's eventId; the legacy `/api/respond`
+  channel is unchanged.
+- History pages on the new build (`session/page`): the page's tail seq is
+  taken from the live session follow (a throwaway follow is opened when
+  none is attached), since the new wire exposes no unary tail surface.
+
+- Cookie-gated dsh web: the downlink now recovers a rejected or expired
+  session cookie on its own — when the `/api/remote.mux` upgrade 401s and
+  a launch token is held, the client re-exchanges before the next dial
+  (the gate rejects before any HTTP retry path could run), so an expired
+  cookie no longer strands the TUI on a silent backoff.
+- Auth failures carry their cause: a 401 that a re-exchange could not
+  clear now reports whether no launch token is configured or the held
+  one was rejected (dsh web restarted), and one-shot commands print the
+  matching recovery line (`dsh-cli --token <token>`).
+- Dialect probe reads the 401 body: a marker-less 401 index is a legacy
+  bearer-gated host (it keeps the legacy wire, whose bearer rides the
+  DSH_TOKEN env), and a unary 404 retries once on the other wire as a
+  misclassification safety net.
+
+- Dsh web lifecycle rework: the auto-started dsh web now PERSISTS across
+  dsh-cli runs — dsh-cli no longer kills it on exit (the child is
+  re-parented, and its stdout/stderr ride
+  `~/.dsh-cli/webhost-<port>.log` instead of dsh-cli's pipes, so it
+  cannot die on a post-exit pipe write). When dsh-cli finds a dsh web
+  already running it connects with the stored launch token; if that live
+  web rejects the stored credentials (e.g. after a manual dsh web
+  restart), dsh-cli kills the live web (via its port listeners),
+  relaunches it, and stores the fresh token before connecting.
+
+### Fixed
+
+- ctrl+d on an empty input no longer quits the program: the released
+  build treated it as the EOF quit, now it is the editor's delete-forward
+  (a no-op on an empty line). The quit chords remain ctrl+c and ctrl+q.
+- Per-turn throughput now counts a turn's fresh tokens: cache re-reads
+  of already-processed context no longer inflate the t/s number (a
+  multi-million-token cache hit no longer reads as millions of tokens of
+  work).
+- The /status connection line reports the dsh host version on builds that
+  don't publish one on the wire: the local dsh launcher (the auto-start
+  binary) answers for it.
+- Input bar caret on wrapped text: a row's extent is now counted in
+  runes, so a multi-byte (CJK) row no longer swallows later rows' caret
+  positions; a wrapped row drops its break-point space so it never
+  overruns the frame; and the end-of-line caret on a full row falls back
+  to the last character instead of a clipped extra cell.
+- Auto-launch when the started dsh web is an old build that prints no
+  launch token: dsh-cli no longer waits the full 90s token deadline for a
+  token that never comes — it settles into the token-less (bare)
+  connection as soon as the port answers, in about 2s, and no longer
+  kills the host it just started.
+- The subagent session window is scrollable now: the child's transcript
+  rarely fits the popup body, so the window walks with the arrows,
+  pgup/pgdn, home/end, and the mouse wheel (the hint line lists them);
+  while the window is open the wheel no longer scrolls the hidden
+  transcript behind it.
+
+- The status bar's token readout (tokens: ↓… ↑…) is live again: a step's
+  usage chunk (the adapter's accounting, which lands ahead of the
+  canonical message) now counts into the turn tokens and the in-flight
+  item at once — and while a step is still streaming, the meter carries
+  the streamed output as a live estimate until the usage lands. The
+  canonical message folds only the remainder, so nothing is counted
+  twice (the per-step t/s samples and the /status metered totals keep
+  their exact values).
+
+- /status token statistics now track the host in real time: the
+  persistent totals (all-time / month / week / day, per workspace, per
+  session) are driven by the host's own cumulative tokenUsage projection
+  — each step's sample is counted as the host reports it (the session/
+  projection push, the tail page's baseline, and the session list), the
+  in-flight step's tokens included, so the aggregate no longer reads
+  under the web client's numbers between steps. While the /status popup
+  is open, the active session's baseline is re-confirmed every few
+  seconds for a live readout. The first baseline of a session also
+  repairs what per-event counting missed (pruned history, web-only
+  steps) without double-counting what it already had; hosts without the
+  projection keep the old per-event accounting.
+
+## 1.0.46
+
+### 新增
+
+- 兼容 cookie 鉴权的新版 dsh web：服务端启动时打印的 launch token
+  （`http://…/?token=…`）首次接触时换取会话 cookie，后续请求带 cookie 访问。
+  优先级：`--token` 参数 > `DSH_LAUNCH_TOKEN` 环境变量 > config 中存储的
+  token。换取到的 cookie 连同其签发主机一并存入 config，后续启动自动
+  复用（base URL 变化时不套用）；cookie 过期时自动重换并重试一次。
+- `--token` 参数（全部命令），one-shot 与 TUI 路径均已接通。
+- 老版 dsh web 行为不变：dialect 每主机探测一次（index 401 = 新版
+  cookie 门，200 = 老版）。
+
+- 冷启动自举：配置的本机 dsh web 未运行时，dsh-cli 自动以 `dsh web
+  --no-open` 启动（host/端口与配置 URL 一致），抓取服务器打印的
+  `?token=…` 行并存入配置，dsh-cli 退出时关闭子进程——覆盖所有退出
+  路径（含 `os.Exit`）。已在运行的 dsh web 保持原样（绝不误杀）。
+  `--no-autostart` 或 `$DSH_NO_AUTOSTART=1` 可关闭；`$DSH_BIN` 可指定
+  不在 PATH 中的 dsh 启动器。非本机的 base URL 不自动启动；仅超时（未
+  拒绝）的主机不视为停机。
+
+- /status 新增 token 价格设置：新增“计费”标签页（第 4 个区块，→ / tab / 4
+  进入），按每百万 token 的价格分设输入 / 输出两个价格字段（↑↓ 切换）；
+  输入合法数字立即生效，无需回车确认（“2.” 这类半截状态等下一位数字，
+  留空清除）。设置后弹窗内所有 token 统计行附带花费（如 “1.2M 输入 /
+  400.4K 输出（133元）”）。
+- 状态栏生成速度（“… · 70t/s”）为服务器最近的平均生成速度，会话一旦
+  产生过生成就一直显示：空闲时会话保留最后的速率，而不是读数消失。
+- 顶部状态栏居中显示时钟（HH:MM:SS，本地时间）；窗口过窄、两侧腾不出
+  位置时自动隐藏。
+- 状态栏 tokens 行后新增每回合吞吐量（"tokens: ↓… ↑… · 70t/s"）：
+  统计范围为单个回合的每秒平均 token 数——回合进行中实时计算，回合
+  结束后显示最终值。
+
+### 改进
+
+- 新版构建使用单条多路复用下行 `/api/remote.mux`（老版双 socket 下行
+  保持不变）：会话事件、队列/任务控制、工作区注册表全部走一条 socket，
+  重新映射回既有内部帧流，UI 与 store 无需感知新协议。
+- 新版构建的审批与用户提问改经 `$events` 结果通道（`/api/$events/result`）
+  应答，以 $events clientId 与帧 eventId 为键；老版 `/api/respond` 通道
+  不变。
+- 新版构建的历史分页（`session/page`）：页面尾部 seq 取自实时的 session
+  follow（无活动 follow 时临时开一条），因为新协议的 unary 面不暴露
+  日志尾部。
+
+- 新版（cookie 鉴权）dsh web：下行流自行恢复被拒或过期的会话 cookie ——
+  `/api/remote.mux` 升级 401 且持有 launch token 时，下次拨号前重新换取
+  （门控在 HTTP 重试路径之前就拒绝，靠它自己救不回来），cookie 过期不再
+  让 TUI 卡在静默退避上。
+- 鉴权失败携带原因：重换后仍 401 时报出是「未配置 launch token」还是
+  「token 被拒（dsh web 已重启）」，一次性命令打印对应的恢复提示
+  （`dsh-cli --token <token>`）。
+- dialect 探测读取 401 响应体：无标记的 401 index 视为老版 bearer 门控
+  主机（保持老线，bearer 走 DSH_TOKEN 环境变量）；unary 404 会在另一条
+  线路上重试一次，作为探测误判的安全网。
+
+- dsh web 生命周期调整：自动启动的 dsh web 现在**跨 dsh-cli 运行持续存活**
+  ——dsh-cli 退出时不再关闭它（子进程被重新收养，stdout/stderr 写入
+  `~/.dsh-cli/webhost-<port>.log` 而非 dsh-cli 的管道，父进程退出后不会
+  因管道写入而死）。dsh-cli 发现 dsh web 已在运行时，使用已保存的 launch
+  token 连接；若该运行中的 web 拒绝已保存的凭据（例如手动重启过 dsh
+  web），dsh-cli 杀掉运行中的 web（按端口监听者）、重新启动并保存新
+  token 后再连接。
+
+### 修复
+
+- 输入框为空时按 ctrl+d 不再退出程序：旧版把它当作 EOF 退出，现改为编
+  辑器的前删（空行上无动作）；退出快捷键仍是 ctrl+c / ctrl+q。
+- 每回合吞吐量改为统计新 token：缓存重读（已处理上下文的重复读取）不再
+  推高 t/s 数值（百万级缓存命中不再被算作百万级的真实工作量）。
+- /status 连接信息在新版 dsh 主机（线上不发布版本号）下显示 dsh 版本：
+  回退读取本地 dsh 启动器（自动启动的二进制）的版本。
+- 输入框换行后光标错位/消失：行范围改按 rune 计数，多字节（CJK）行不再
+  吞掉后续行的光标位置；换行行丢弃换行点空格、不再超出边框；满行末尾
+  的光标回退到最后一个字符（而不是被裁掉的额外单元）。
+- 自动启动时，若被启动的 dsh web 是不输出启动 token 的旧版本：dsh-cli
+  不再空等 90 秒的 token 超时——端口可达即按无 token（裸）连接就绪（约 2
+  秒），不再杀掉刚启动的主机。
+- subagent 会话窗口现在可滚动：子会话内容通常超出弹窗正文，窗口现支持
+  ↑↓、翻页键、home/end 与鼠标滚轮（提示行有说明）；窗口打开时滚轮不再
+  滚动其后隐藏的转录。
+
+- 状态栏 token 读数（tokens: ↓… ↑…）恢复实时：每一步的 usage 块（适配
+  器的用量报告，先于规范消息到达）现在即时计入回合统计与在途消息——步
+  骤仍在流式生成时，读数先按已流出的内容估算、实时增长，直到用量数据
+  落地时替换为精确值。规范消息只补差额，不重复计数（每步 t/s 采样与
+  /status 的计量总额保持精确值不变）。
+
+- /status 的 token 统计现在实时跟随宿主：持久化汇总（全部 / 本月 / 本周 /
+  今日、按工作区、按会话）改为以宿主自己的累计 tokenUsage 投影为准——
+  每一步的用量在宿主报告时即计入（session/projection 推送、尾页基线、
+  会话列表），包含当前在途步骤的 token，汇总不再低于 Web 端的读数。/status
+  弹窗打开期间，活跃会话的基线每数秒重新确认一次，读数保持实时。会话首次
+  确认基线时，同时补上逐事件统计漏掉的部分（被裁剪的历史、仅 Web 端使用），
+  且不重复计数已有的部分；没有该投影的旧版宿主仍走原来的逐事件统计。
+
 ## 1.0.45
 
 ### 新增

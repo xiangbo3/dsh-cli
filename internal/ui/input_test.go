@@ -307,8 +307,14 @@ func TestInputRenderCaretOverChar(t *testing.T) {
 		t.Fatalf("underlined-space end caret missing: %q", stripANSI(tail))
 	}
 	tail4 := in2.render(m, 4)[0]
-	if got, want := plainWidth(tail4), plainWidth(over4); got != want+1 {
-		t.Fatalf("end-caret line width %d, want over-char width %d + 1 cell", got, want)
+	// A full row: the end caret has no cell of its own (the added space
+	// would overrun the frame and get clipped off) — the last char
+	// carries the cursor style instead, so the row stays exactly full.
+	if got, want := plainWidth(tail4), plainWidth(over4); got != want {
+		t.Fatalf("full-row end-caret line width %d, want the over-char width %d (no added cell)", got, want)
+	}
+	if !strings.Contains(tail4, seq+"世") {
+		t.Fatalf("full-row end caret must fall back to the last char: %q", stripANSI(tail4))
 	}
 }
 
@@ -708,5 +714,103 @@ func TestSubmitRecordsHistoryEndToEnd(t *testing.T) {
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if len(m.inp.hist) != 1 {
 		t.Fatalf("history after re-submit: %q", m.inp.hist)
+	}
+}
+
+// TestInputWrapCaretOnMultiRows pins the caret over wrapped text: a
+// multi-byte (CJK) row must not swallow the later rows' caret positions
+// (the row's extent is runes, not bytes), a wrapped row drops its
+// break-point space (it must not overrun its width), and a caret parked
+// in the dropped gap sits on the previous row's end.
+func TestInputWrapCaretOnMultiRows(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+	t.Setenv("NO_COLOR", "")
+
+	a := app.New("http://127.0.0.1:3999")
+	m := NewModel(a)
+	m.splashOff = true
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	seq := cursorSeq(m.th)
+
+	// A 10-wide bar: prompt 2 + usable 8 (the wrap floor keeps it at
+	// 8). CJK chars are 2 cells, so four (8 cells) fill a row and the
+	// fifth wraps. The caret must follow the text onto the second row.
+	in := newInputLine()
+	for _, r := range "中文测试中文" {
+		in.insertRune(r)
+	}
+	in.cur = 5 // after "中文测试中": the caret sits on the second physical row
+	rows := in.render(m, 10)
+	if len(rows) != 2 {
+		t.Fatalf("wrapped rows = %d, want 2: %q", len(rows), rows)
+	}
+	if !strings.Contains(rows[1], seq+"文") {
+		t.Fatalf("caret lost on the wrapped CJK row: %q", stripANSI(rows[1]))
+	}
+	if strings.Contains(rows[0], seq) {
+		t.Fatalf("first row swallowed the caret: %q", stripANSI(rows[0]))
+	}
+	// A caret parked at the first row's end: the row is full (8 cells),
+	// so the end caret falls back to its last char (no added cell).
+	in.cur = 4
+	rows = in.render(m, 10)
+	if !strings.Contains(rows[0], seq+"试") {
+		t.Fatalf("full-row end caret must fall back to the last char: %q", stripANSI(rows[0]))
+	}
+	if strings.Contains(rows[0], spaceCursorSeq(m.th)+" ") {
+		t.Fatalf("full row must not add the caret cell: %q", stripANSI(rows[0]))
+	}
+
+	// Break-point spaces: "abcdefgh  world" fills row one (8 cells),
+	// wraps, and drops both break spaces — the wrapped row stays within
+	// its width, and a caret parked in the dropped gap sits on the
+	// previous row's end (the full row's end caret falls back to its
+	// last char).
+	in2 := newInputLine()
+	for _, r := range "abcdefgh  world" {
+		in2.insertRune(r)
+	}
+	in2.cur = 9 // between the dropped spaces
+	rows = in2.render(m, 10)
+	if len(rows) != 2 {
+		t.Fatalf("spaced rows = %d, want 2: %q", len(rows), rows)
+	}
+	if got := strings.TrimSpace(stripANSI(rows[1])); got != "world" {
+		t.Fatalf("wrapped row kept the break space: %q", got)
+	}
+	if !strings.Contains(rows[0], seq+"h") {
+		t.Fatalf("gap caret must park on the previous row's end: %q", stripANSI(rows[0]))
+	}
+	if pw := plainWidth(rows[0]); pw != 10 {
+		t.Fatalf("full row width %d, want exactly 10", pw)
+	}
+
+	// The caret at a full row's end takes the last char's cell (the
+	// added space would be clipped by the frame): "abcdefgh" exactly
+	// fills the 8-wide budget.
+	in3 := newInputLine()
+	for _, r := range "abcdefgh" {
+		in3.insertRune(r)
+	}
+	in3.cur = 8
+	row := in3.render(m, 10)[0]
+	if !strings.Contains(row, seq+"h") {
+		t.Fatalf("full-row end caret: want cursor over the last char: %q", stripANSI(row))
+	}
+	if pw := plainWidth(row); pw != 10 {
+		t.Fatalf("full-row caret line width %d, want exactly 10", pw)
+	}
+
+	// A caret at the end of a row that is NOT full still gets its
+	// underlined-space cell (the budget allows it).
+	in4 := newInputLine()
+	for _, r := range "ab" {
+		in4.insertRune(r)
+	}
+	in4.cur = 2
+	row = in4.render(m, 10)[0]
+	if !strings.Contains(row, spaceCursorSeq(m.th)+" ") {
+		t.Fatalf("non-full row-end caret lost its added cell: %q", stripANSI(row))
 	}
 }

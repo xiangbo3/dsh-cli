@@ -241,3 +241,59 @@ func TestTopBarVerbSweep(t *testing.T) {
 		t.Fatalf("sweep advanced on %d/%d ticks, want a continuous pass", moved, span-1)
 	}
 }
+
+// TestTopBarClockCentered pins the top bar's centered wall clock: the
+// HH:MM:SS readout sits exactly in the middle of the bar (flanked by free
+// cells), the name/version stays on the right at the narrowest width the
+// clock renders, and below that the clock drops out (the bar keeps the
+// plain two-block layout, still within the window).
+func TestTopBarClockCentered(t *testing.T) {
+	a := app.New("http://127.0.0.1:3999")
+	m := NewModel(a)
+	m.splashOff = true
+	m.now = time.Date(2026, 3, 4, 5, 6, 7, 0, time.Local)
+	clock := "05:06:07"
+	const clockW = 8 // HH:MM:SS
+
+	m.W, m.H = 120, 30
+	bar := m.topBar(m.W)
+	if pw := plainWidth(bar); pw > m.W {
+		t.Fatalf("topBar width = %d, want <= %d", pw, m.W)
+	}
+	plain := stripANSI(bar)
+	idx := strings.Index(plain, clock)
+	if idx < 0 {
+		t.Fatalf("clock missing from the top bar: %q", plain)
+	}
+	want := (m.W - clockW) / 2
+	if col := plainWidth(plain[:idx]); col != want {
+		t.Fatalf("clock at column %d, want centered at %d: %q", col, want, plain)
+	}
+	if got := plain[idx-1 : idx+clockW+1]; got != " "+clock+" " {
+		t.Fatalf("clock must sit between free cells: %q", got)
+	}
+	if !strings.Contains(plain, nameVer) {
+		t.Fatalf("topBar lost the name+version: %q", plain)
+	}
+
+	// The narrowest width the clock still renders keeps the
+	// name/version whole on the right (the state readout drops out);
+	// below it the clock disappears and the bar stays in bounds.
+	for _, w := range []int{30, 36, 37, 40, 100} {
+		m.W = w
+		got := stripANSI(m.topBar(w))
+		if pw := plainWidth(m.topBar(w)); pw > w {
+			t.Fatalf("topBar(%d) = %d cells wide, want <= %d", w, pw, w)
+		}
+		if !strings.Contains(got, nameVer) {
+			t.Fatalf("topBar(%d) lost the name+version: %q", w, got)
+		}
+		centered := strings.Contains(got, " "+clock+" ")
+		if w >= 37 && !centered {
+			t.Fatalf("topBar(%d) dropped the clock: %q", w, got)
+		}
+		if w < 37 && centered {
+			t.Fatalf("topBar(%d) shows a clock with no room for it: %q", w, got)
+		}
+	}
+}

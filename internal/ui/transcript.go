@@ -509,6 +509,25 @@ func renderUser(m *Model, it *core.Item, width int) []string {
 	return out
 }
 
+// estimateStreamed rough-sizes an in-flight step's generated output from
+// its streamed content (text, reasoning, tool-call args) with the same
+// ballpark as estimateTokens: the status bar carries it live until the
+// step's usage lands (which then replaces it).
+func estimateStreamed(it *core.Item) int {
+	var s strings.Builder
+	for _, b := range it.Blocks {
+		switch b.Kind {
+		case "text", "reasoning":
+			s.WriteString(b.Text)
+		case "tool":
+			if b.Tool != nil {
+				s.WriteString(b.Tool.ArgsFull)
+			}
+		}
+	}
+	return estimateTokens(s.String())
+}
+
 // estimateTokens rough-sizes a block for the fold line: CJK runs about a
 // token per char, the rest about four chars per token (DeepSeek ballpark —
 // a display hint, never a meter).

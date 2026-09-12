@@ -34,6 +34,11 @@ type Opts struct {
 	Verbose   bool
 	Thinking  bool
 	Timeout   time.Duration
+	Token     string // launch token (cookie-gated build); "" = stored/config
+	// NoAutostart disables the auto-start of a down loopback dsh web
+	// (the default is to launch `dsh web` as a child and stop it on
+	// exit).
+	NoAutostart bool
 }
 
 // DefaultTimeout bounds a one-shot turn.
@@ -51,7 +56,7 @@ func Run(ctx context.Context, o Opts, prompt string) (string, error) {
 	if err := o.Fill(); err != nil {
 		return "", err
 	}
-	a := app.New(o.URL)
+	a := app.NewWith(o.URL, o.Token)
 	// One-shot turns consume tokens too: count them into the same
 	// persistent statistics the /status popup reads.
 	if p, ok := usage.DefaultPath(); ok {

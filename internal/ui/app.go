@@ -140,6 +140,13 @@ type Model struct {
 	oscDeadline  time.Time
 
 	mods []modal
+	// statusFetching/statusLastRefresh pace the /status popup's live
+	// refresh: while the popup is open the active session's host
+	// tokenUsage baseline is re-confirmed at most once per
+	// statusRefreshEvery, one fetch in flight — the report then tracks
+	// the host's current totals, the in-flight step included.
+	statusFetching    bool
+	statusLastRefresh time.Time
 	// openedInter records which parked answerable frames already had a
 	// modal opened (auto-open fires once per rpcId; esc-closed frames
 	// stay parked and reopen via ctrl+i).
@@ -157,6 +164,17 @@ type Model struct {
 	// renders (nil when the app attached no recorder: the popup shows
 	// its "not recording" face).
 	usage *usage.Recorder
+	// tokenInPrice/tokenOutPrice are the per-million-tokens costs for
+	// input / output tokens (config.json tokenInPrice/tokenOutPrice):
+	// the /status billing section edits them (applied live as typed),
+	// the cost readouts render from them. In memory so the status popup
+	// never re-reads the file per frame.
+	tokenInPrice  float64
+	tokenOutPrice float64
+	// lastGenRate caches each session's last computed generation rate
+	// (t/s): when the generation window drains (idle), the status bar's
+	// readout keeps the last value instead of going off.
+	lastGenRate map[string]int
 
 	booted bool
 	// bootWsChecked closes the boot auto workspace switch: once the
@@ -209,9 +227,13 @@ func NewModel(a *app.App) *Model {
 		openedInter: map[string]bool{},
 		loc:         loc,
 		usage:       a.Usage(),
+		lastGenRate: map[string]int{},
 		follow:      true,
 		transDirty:  true, // first frame renders from a cold cache
 	}
+	cfg := config.Load()
+	m.tokenInPrice = cfg.TokenInPrice
+	m.tokenOutPrice = cfg.TokenOutPrice
 	m.locRef.Store(loc)
 	// The store's turn-end toast lands on the store's goroutine, so its
 	// text is formatted through the lock-free locale view.
@@ -251,6 +273,10 @@ func NewModel(a *app.App) *Model {
 func (m *Model) SetProg(p *tea.Program) { m.prog = p }
 
 type dirtyMsg struct{}
+
+// statusRefreshDoneMsg settles the /status popup's live baseline
+// reconcile (the tail-page fetch worker's reply).
+type statusRefreshDoneMsg struct{}
 
 // permBaselineMsg reports that a session's tail (carrying the permissions
 // projection baseline) has been pulled; the pending permission cycle then
@@ -650,6 +676,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.preloadTrans()
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.tick())
+		// /status popup open: reconcile the active session's host
+		// tokenUsage baseline (its tail page's projections), so the
+		// report shows the host's current totals — the in-flight
+		// step's sample included — instead of the last step boundary.
+		if m.topModal() != nil {
+			if _, ok := m.topModal().(*statusModal); ok {
+				if !m.statusFetching && m.now.Sub(m.statusLastRefresh) >= statusRefreshEvery {
+					m.statusLastRefresh = m.now
+					m.statusFetching = true
+					cmds = append(cmds, m.cmdReconcileUsage())
+				}
+			}
+		}
 		// Periodically re-read the live terminal theme so a theme switch
 		// while the TUI is up follows through: the probe writes the OSC
 		// 10/11 query, the answer rides the key reader, ingestThemeReply
@@ -674,6 +713,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(cmds...)
+
+	case statusRefreshDoneMsg:
+		m.statusFetching = false
+		return m, nil
 
 	case dirtyMsg:
 		// The state moved; the next frame re-syncs the transcript cache
@@ -1078,6 +1121,27 @@ func (m *Model) bootWorkspaceSwitch(id string) {
 	m.addToast(core.Notice{Level: "info", Text: m.loc.T("ws.boot.switched", workspacePathLabel(ws))})
 }
 
+// statusRefreshEvery paces the /status popup's live baseline reconcile.
+const statusRefreshEvery = 5 * time.Second
+
+// cmdReconcileUsage re-pulls the active session's tail page and confirms
+// its host tokenUsage baseline off the model goroutine (the /status
+// popup's live refresh); the reply settles the fetch flag, and the next
+// frame re-renders the report from the recorder.
+func (m *Model) cmdReconcileUsage() tea.Cmd {
+	id := m.activeID()
+	if id == "" || m.usage == nil {
+		m.statusFetching = false
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		m.app.ReconcileUsage(ctx, id)
+		return statusRefreshDoneMsg{}
+	}
+}
+
 func (m *Model) cmdLoadTail(id string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1125,7 +1189,17 @@ func (m *Model) cmdLoadOlder(id string) tea.Cmd {
 // ---- toasts / flash -------------------------------------------------------------
 
 func (m *Model) addToast(n core.Notice) {
-	m.toasts = append(m.toasts, toast{level: n.Level, text: n.Text, until: m.now.Add(4 * time.Second)})
+	life := 4 * time.Second
+	if n.Life > 0 {
+		life = n.Life
+	}
+	now := m.now
+	if now.IsZero() {
+		// A notice can land before the first tick set the render clock;
+		// anchoring to m.now then would expire the toast instantly.
+		now = time.Now()
+	}
+	m.toasts = append(m.toasts, toast{level: n.Level, text: n.Text, until: now.Add(life)})
 	if len(m.toasts) > 3 {
 		m.toasts = m.toasts[len(m.toasts)-3:]
 	}
@@ -1290,9 +1364,8 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case km.Type == tea.KeyCtrlN && emptyInput:
 		return m, m.openModelPicker()
-	case km.Type == tea.KeyCtrlD && emptyInput:
-		m.quitting = true
-		return m, tea.Quit
+	// (ctrl+d on an empty input is the editor's delete-forward — a no-op,
+	// not an EOF quit: the quit chords are ctrl+c and ctrl+q.)
 	case km.Type == tea.KeyCtrlC:
 		if !emptyInput {
 			m.inp.clear()
@@ -1517,9 +1590,15 @@ const wheelStep = 3
 func (m *Model) handleMouse(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch mm.Button {
 	case tea.MouseButtonWheelUp:
-		m.scrollBy(-wheelStep)
+		// A scrolling modal on top (the subagent transcript) takes the
+		// wheel; the transcript behind it scrolls only when none does.
+		if !m.modalWheel(-wheelStep) {
+			m.scrollBy(-wheelStep)
+		}
 	case tea.MouseButtonWheelDown:
-		m.scrollBy(wheelStep)
+		if !m.modalWheel(wheelStep) {
+			m.scrollBy(wheelStep)
+		}
 	}
 	switch mm.Action {
 	case tea.MouseActionPress:
@@ -1675,6 +1754,16 @@ func (m *Model) inpRowAt(x, y int) (idx int, ok bool) {
 		return 0, false
 	}
 	return m.inp.indexAt(m, x, y-m.inpY)
+}
+
+// modalWheel routes one wheel notch to the topmost modal that scrolls
+// its own body (the subagent transcript window); false when the wheel
+// belongs to the transcript behind.
+func (m *Model) modalWheel(d int) bool {
+	if wm, ok := m.topModal().(wheelModal); ok {
+		return wm.wheel(d)
+	}
+	return false
 }
 
 // plateGeom is the topmost modal's popup box origin and size in screen
@@ -2259,7 +2348,7 @@ func (m *Model) localSlash(name, rest string) (tea.Cmd, bool) {
 	case "status":
 		// The usage popup: host line plus the token statistics (total /
 		// month / week / day, per workspace, per session).
-		m.openModal(newStatusModal(m.loc))
+		m.openModal(newStatusModal(m))
 		return nil, true
 	case "new":
 		return m.cmdNewSession(rest), true
@@ -2660,6 +2749,9 @@ func (m *Model) openSubTranscript() tea.Cmd {
 		label = e.Id
 	}
 	m.openModal(&subagentModal{parent: id, child: e.Id, mode: e.Mode, label: label, loading: true, loc: m.loc})
+	// Live child events ride their own follow stream (the page fetch
+	// above is the baseline; this keeps the window current).
+	m.app.FollowSubagent(id, e.Id, e.Mode)
 	return m.cmdFetchSubHistory(id, e.Id, e.Mode)
 }
 
@@ -3118,7 +3210,8 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 		}
 		return nil, true
 	case *subagentModal:
-		// A read-only page: any of its handled chords just closes it.
+		// The page walks on the arrows/page keys; only the closing
+		// chords close the window.
 		if km.Type == tea.KeyEsc || km.Type == tea.KeyEnter || km.Type == tea.KeyCtrlH {
 			m.closeModal()
 		}
@@ -3189,7 +3282,13 @@ func (m *Model) searchCmd(q string) tea.Cmd {
 }
 
 func (m *Model) closeModal() {
+	top := m.mods[len(m.mods)-1]
 	m.mods = m.mods[:len(m.mods)-1]
+	// A child transcript window closes its follow stream (the
+	// cookie-gated build follows only open transcripts).
+	if sm, ok := top.(*subagentModal); ok {
+		m.app.UnfollowSubagent(sm.child)
+	}
 }
 
 // ---- merged slash commands -----------------------------------------------------------
