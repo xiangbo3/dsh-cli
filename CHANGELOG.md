@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.47
+
+### Fixed
+
+- Windows release builds: the non-unix webhost file used `syscall.Kill`,
+  which Go's Windows syscall package does not define, so the
+  windows/amd64 and windows/386 cross-builds failed with
+  `undefined: syscall.Kill`. The kill now goes through
+  `os.FindProcess` + `Process.Kill` (a forced terminate on Windows);
+  unix hosts keep their process-group kill unchanged.
+
+## 1.0.47
+
+### 修复
+
+- Windows 发布构建：非 unix 的 webhost 文件使用了 Go 的 Windows syscall
+  包未定义的 `syscall.Kill`，交叉编译 windows/amd64 与 windows/386
+  时报 `undefined: syscall.Kill`。现改经 `os.FindProcess` +
+  `Process.Kill`（Windows 上为强制终止）；unix 各平台保持原有进程组
+  kill 不变。
+
 ## 1.0.46
 
 ### Added
