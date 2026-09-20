@@ -413,8 +413,17 @@ func applyProjectionValues(st *Sess, seq int64, values map[string]json.RawMessag
 			continue
 		}
 		st.proj[k] = projVal{Seq: seq, V: v}
-		if k == "title" {
+		switch k {
+		case "title":
 			st.titleProj = decodeTitle(v)
+		case "agentPreset":
+			// The upgraded host carries the session preset here (its
+			// roster rows have no top-level field): the summary value
+			// feeds the /mode picker current mark and /new inheritance.
+			var p string
+			if json.Unmarshal(v, &p) == nil {
+				st.S.AgentPreset = p
+			}
 		}
 	}
 	if pv, ok := st.proj["goal"]; ok {

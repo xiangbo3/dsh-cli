@@ -419,7 +419,16 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		"subagent/descriptor", "team/member", "team/task", "team/message/queued", "team/message/delivered",
 		"approval/asked", "approval/decided", "approval/policy",
 		"feedback/record", "tool/code-dispatch", "tool/code-dispatch-start",
-		"goal/change", "web/deepseek-search-llm-request":
+		// The upgraded build renamed the PTC dispatch wrapper from
+		// code-dispatch; the real tool rows come from the tool-call events.
+		"tool/ptc-dispatch", "tool/ptc-dispatch-start",
+		"goal/change", "web/deepseek-search-llm-request",
+		// Upgraded-build side-state records: attempt traces, the system
+		// prompt node, model/policy bookkeeping, feedback and delivery
+		// acks — none of them is a transcript line.
+		"assistant/attempt", "deliverables/presented", "feedback/message-delete",
+		"feedback/message-put", "model/selection", "session-log-deepseek/delivery-accepted",
+		"subagent/catalog", "subagent/model-selection-policy", "system/message":
 		// Side-state or metadata events: no transcript row of their own.
 		t.noteSeq(ev.Seq, ev.Time)
 		return false, nil

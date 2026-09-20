@@ -6,4 +6,4 @@ package version
 
 // Version is the client version (the host reports its own separately via
 // host.describe).
-const Version = "1.0.48"
+const Version = "1.0.49"

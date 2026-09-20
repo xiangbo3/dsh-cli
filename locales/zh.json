@@ -1,5 +1,5 @@
 {
-  "_version": "1.0.48",
+  "_version": "1.0.49",
   "approval.hint": "  a/enter 允许一次 · d/esc 拒绝",
   "approval.hint.armed": "  再按 a 确认允许 · d 取消",
   "approval.title": "工具审批 — ",

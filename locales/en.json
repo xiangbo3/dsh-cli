@@ -1,5 +1,5 @@
 {
-  "_version": "1.0.48",
+  "_version": "1.0.49",
   "approval.hint": "  a/enter allow once · d/esc reject",
   "approval.hint.armed": "  a again to confirm allow · d to back out",
   "approval.title": "tool approval — ",

@@ -420,6 +420,30 @@ func TestFoldPrependOrdering(t *testing.T) {
 	}
 }
 
+// TestFoldDispatchEventsSideState pins the PTC dispatch wrapper events
+// (the upgraded build renamed code-dispatch): they carry only the
+// root/parent/sub call ids, so they must not spawn transcript lines.
+func TestFoldDispatchEventsSideState(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(ev(t, "tool/ptc-dispatch-start", 1, map[string]any{
+		"rootCallId": "r", "parentCallId": "r", "subCallId": "r:ptc:1", "name": "run_code",
+	}))
+	tr.Apply(ev(t, "tool/ptc-dispatch", 2, map[string]any{
+		"rootCallId": "r", "parentCallId": "r", "subCallId": "r:ptc:1", "name": "run_code",
+	}))
+	tr.Apply(ev(t, "tool/code-dispatch-start", 3, map[string]any{"rootCallId": "r"}))
+	for i, typ := range []string{
+		"assistant/attempt", "deliverables/presented", "feedback/message-delete",
+		"feedback/message-put", "model/selection", "session-log-deepseek/delivery-accepted",
+		"subagent/catalog", "subagent/model-selection-policy", "system/message",
+	} {
+		tr.Apply(ev(t, typ, int64(4+i), map[string]any{"x": 1}))
+	}
+	if len(tr.Items) != 0 {
+		t.Fatalf("items = %d, want 0: %+v", len(tr.Items), tr.Items)
+	}
+}
+
 func TestFoldUnknownEventFallback(t *testing.T) {
 	tr := NewTranscript()
 	tr.Apply(ev(t, "my-plugin/thing", 1, map[string]any{"x": 1}))

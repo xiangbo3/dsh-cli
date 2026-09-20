@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.49
+
+### Fixed
+
+- /mode switching against the upgraded dsh web build: the typed command
+  and the picker work again, and the picker now marks the current mode.
+- /new inherits the active session's mode on upgraded hosts instead of
+  failing on a stale default preset.
+- The upgraded build's internal dispatch events no longer clutter the
+  transcript with raw "tool/ptc-dispatch" lines.
+- Dropped a model-list route for an endpoint the upgraded host no
+  longer has; old hosts are unaffected.
+
+## 1.0.49
+
+### 修复
+
+- 修复升级后的 dsh web 下 /mode 切换报错；选择器现在会标出当前模式。
+- 升级后的宿主上 /new 正确继承当前会话的模式，不再因宿主默认 preset
+  过期而失败。
+- 升级后构建的内部分发事件不再往对话窗口刷 "tool/ptc-dispatch" 原始行。
+- 移除升级后宿主已不存在的模型列表路由；旧版宿主不受影响。
+
 ## 1.0.48
 
 ### Fixed

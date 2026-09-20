@@ -48,6 +48,9 @@ var newRoutes = map[string]newRoute{
 	"session.attachment":            {"session/attachment", wrapRequest},
 	"subagent.list":                 {"subagents/list", "top"},
 	"subagent.prompt":               {"subagents/prompt", wrapRequest},
+	// The upgraded gateway renamed the interrupt endpoint; the args are
+	// composed in newArgs (the wrap slot is not consulted for it).
+	"subagent.interrupt":            {"subagents/interruptByParent", wrapNone},
 	"workspace.create":              {"workspace/create", wrapRequest},
 	"workspace.rename":              {"workspace/rename", wrapRequest},
 	"workspace.delete":              {"workspace/delete", wrapRequest},
@@ -56,6 +59,9 @@ var newRoutes = map[string]newRoute{
 	"workspace.archiveSession":      {"workspace/archiveSession", wrapRequest},
 	"skill.list":                    {"skills/list", wrapRequest},
 	"agentPreset.list":              {"agentPresets/list", wrapNone},
+	// /mode switch: the upgraded gateway routes by path, so the select
+	// endpoint needs its route here too (args composed in newArgs).
+	"agentPreset.select":            {"agentPresets/select", wrapNone},
 	"host.listDirectory":            {"directoryPicker/list", "path"},
 	"host.createDirectory":          {"directoryPicker/createDirectory", "path"},
 	"host.openPath":                 {"session/openWorkspacePath", wrapRequest},
@@ -69,7 +75,9 @@ var newRoutes = map[string]newRoute{
 	"credentials.set":               {"credentials/set", "top"},
 	"credentials.unset":             {"credentials/unset", "top"},
 	"llm.providers":                 {"llm/listProviders", wrapNone},
-	"llm.models":                    {"llm/listModels", "provider"},
+	// llm.models has no route: the upgraded host dropped listModels (its
+	// discoverModels takes a different shape) and it reaches only the
+	// untyped Call escape hatch — a call there reports "no route".
 	"goal.create":                   {"goals/create", "goal"},
 	"goal.edit":                     {"goals/edit", "goalRef"},
 	"goal.pause":                    {"goals/pause", "goalRef"},
@@ -208,14 +216,6 @@ func newArgs(method string, rawPayload []byte, rpcId string) ([]byte, error) {
 			args["name"] = p.Name
 		}
 		return json.Marshal(map[string]any{"args": args})
-	case "provider":
-		var p struct {
-			Provider string `json:"provider"`
-		}
-		if err := json.Unmarshal(rawPayload, &p); err != nil {
-			return nil, err
-		}
-		return json.Marshal(map[string]any{"args": map[string]any{"provider": p.Provider}})
 	case "goal":
 		var p map[string]any
 		if err := json.Unmarshal(rawPayload, &p); err != nil {
