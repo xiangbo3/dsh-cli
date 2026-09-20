@@ -152,3 +152,90 @@ func TestCreateSessionMapsRegisteredPathToWorkspace(t *testing.T) {
 		t.Fatalf("registered path must travel as workspaceId: %+v", createSeen)
 	}
 }
+
+// presetCreateHost serves a preset roster and the create endpoint, echoing
+// the create payload for the pin assertions.
+func presetCreateHost(t *testing.T, presets []protocol.AgentPresetEntry, createSeen *map[string]any) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/agentPreset.list", func(w http.ResponseWriter, r *http.Request) {
+		writeRPCValue(t, w, protocol.AgentPresetListResponse{Presets: presets})
+	})
+	mux.HandleFunc("/api/session.create", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		env := map[string]any{}
+		_ = json.Unmarshal(raw, &env)
+		payload, _ := env["payload"].(map[string]any)
+		if createSeen != nil {
+			*createSeen = payload
+		}
+		writeRPCValue(t, w, protocol.SessionCreateResponse{SessionId: "s2"})
+	})
+	return httptest.NewServer(mux)
+}
+
+// TestCreateSessionPinsStaleDefault is the upgrade case: the host's
+// configured default is a preset id the roster no longer supplies (no
+// default-flagged row), so an unnamed create would be rejected — the client
+// pins the deployment's base default instead.
+func TestCreateSessionPinsStaleDefault(t *testing.T) {
+	var createSeen map[string]any
+	srv := presetCreateHost(t, []protocol.AgentPresetEntry{
+		{Id: "standard", Trust: "system"},
+		{Id: "ptc", Trust: "system"},
+		{Id: "minimal", Trust: "system"},
+		{Id: "cordis", Trust: "system"},
+	}, &createSeen)
+	defer srv.Close()
+	a := New(srv.URL)
+	if _, err := a.CreateSession(context.Background(), protocol.SessionCreateRequest{Cwd: "/tmp/proj"}); err != nil {
+		t.Fatal(err)
+	}
+	if createSeen["agentPreset"] != "standard" {
+		t.Fatalf("stale default must pin standard: %+v", createSeen)
+	}
+}
+
+// TestCreateSessionPinsFirstIntactWhenStandardBroken: a stale default with
+// standard itself broken falls to the first intact row (roster order).
+func TestCreateSessionPinsFirstIntactWhenStandardBroken(t *testing.T) {
+	var createSeen map[string]any
+	srv := presetCreateHost(t, []protocol.AgentPresetEntry{
+		{Id: "standard", Trust: "system", Broken: "unparsable yaml"},
+		{Id: "ptc", Trust: "system"},
+	}, &createSeen)
+	defer srv.Close()
+	a := New(srv.URL)
+	if _, err := a.CreateSession(context.Background(), protocol.SessionCreateRequest{Cwd: "/tmp/proj"}); err != nil {
+		t.Fatal(err)
+	}
+	if createSeen["agentPreset"] != "ptc" {
+		t.Fatalf("broken standard must fall to the first intact row: %+v", createSeen)
+	}
+}
+
+// TestCreateSessionKeepsIntactDefault: a roster that flags its default row
+// resolves on the host side; the client pins nothing, and an explicit
+// preset travels as given.
+func TestCreateSessionKeepsIntactDefault(t *testing.T) {
+	presets := []protocol.AgentPresetEntry{
+		{Id: "standard", Trust: "system", IsDefault: true},
+		{Id: "ptc", Trust: "system"},
+	}
+	var createSeen map[string]any
+	srv := presetCreateHost(t, presets, &createSeen)
+	defer srv.Close()
+	a := New(srv.URL)
+	if _, err := a.CreateSession(context.Background(), protocol.SessionCreateRequest{Cwd: "/tmp/proj"}); err != nil {
+		t.Fatal(err)
+	}
+	if createSeen["agentPreset"] != nil {
+		t.Fatalf("intact default must stay unnamed: %+v", createSeen)
+	}
+	if _, err := a.CreateSession(context.Background(), protocol.SessionCreateRequest{Cwd: "/tmp/proj", AgentPreset: "minimal"}); err != nil {
+		t.Fatal(err)
+	}
+	if createSeen["agentPreset"] != "minimal" {
+		t.Fatalf("explicit preset must travel unchanged: %+v", createSeen)
+	}
+}

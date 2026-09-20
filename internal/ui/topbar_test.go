@@ -64,7 +64,7 @@ func TestTopBarTitleYieldsToNameVersion(t *testing.T) {
 	m.splashOff = true
 	m.W, m.H = 120, 30
 	m.st.SetSessions([]protocol.SessionSummary{
-		{SessionId: "s1", AgentPreset: "code"},
+		{SessionId: "s1", AgentPreset: "ptc"},
 	})
 	m.st.SetActive("s1")
 	m.st.SetConnected(true)

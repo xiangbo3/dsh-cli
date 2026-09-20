@@ -1,5 +1,5 @@
 {
-  "_version": "1.0.49",
+  "_version": "1.0.50",
   "approval.hint": "  a/enter 允许一次 · d/esc 拒绝",
   "approval.hint.armed": "  再按 a 确认允许 · d 取消",
   "approval.title": "工具审批 — ",
@@ -122,9 +122,9 @@
   "mode.applied": "模式 → %s",
   "mode.err.roster": "模式列表：%s",
   "mode.hint": "  ↑↓ 选择 · enter 使用 · esc 关闭",
-  "mode.label.code": "PTC 模式",
   "mode.label.cordis": "创作者模式",
   "mode.label.minimal": "极简模式",
+  "mode.label.ptc": "PTC 模式",
   "mode.label.standard": "标准模式",
   "mode.loading": "  正在加载模式…",
   "mode.mark.current": " 当前",

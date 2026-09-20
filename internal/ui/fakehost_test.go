@@ -116,7 +116,7 @@ func (fh *fakeHost) unary(method string, payload json.RawMessage) any {
 		return protocol.AgentPresetListResponse{
 			Presets: []protocol.AgentPresetEntry{
 				{Id: "standard", Trust: "system", IsDefault: true},
-				{Id: "code", Trust: "system"},
+				{Id: "ptc", Trust: "system"},
 				{Id: "minimal", Trust: "system"},
 				{Id: "cordis", Trust: "system"},
 			},

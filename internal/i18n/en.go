@@ -250,7 +250,7 @@ var en = map[string]string{
 
 	// ---- mode picker
 	"mode.label.standard": "Standard mode",
-	"mode.label.code":     "PTC mode",
+	"mode.label.ptc":      "PTC mode",
 	"mode.label.minimal":  "Minimal mode",
 	"mode.label.cordis":   "Creator mode",
 	"new.session.mode":    "new session · mode → %s",

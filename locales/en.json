@@ -1,5 +1,5 @@
 {
-  "_version": "1.0.49",
+  "_version": "1.0.50",
   "approval.hint": "  a/enter allow once · d/esc reject",
   "approval.hint.armed": "  a again to confirm allow · d to back out",
   "approval.title": "tool approval — ",
@@ -122,9 +122,9 @@
   "mode.applied": "mode → %s",
   "mode.err.roster": "roster: %s",
   "mode.hint": "  ↑↓ select · enter use · esc close",
-  "mode.label.code": "PTC mode",
   "mode.label.cordis": "Creator mode",
   "mode.label.minimal": "Minimal mode",
+  "mode.label.ptc": "PTC mode",
   "mode.label.standard": "Standard mode",
   "mode.loading": "  loading modes…",
   "mode.mark.current": " current",

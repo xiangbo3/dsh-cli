@@ -37,7 +37,7 @@ var BuiltIn = []Info{
 		Desc:  "Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.",
 	},
 	{
-		ID:    "code",
+		ID:    "ptc",
 		Name:  "PTC mode",
 		Alias: "ptc",
 		Desc:  "All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program.",

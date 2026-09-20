@@ -137,7 +137,7 @@ var zh = map[string]string{
 	"mode.applied":              "模式 → %s",
 	"mode.err.roster":           "模式列表：%s",
 	"mode.hint":                 "  ↑↓ 选择 · enter 使用 · esc 关闭",
-	"mode.label.code":           "PTC 模式",
+	"mode.label.ptc":            "PTC 模式",
 	"mode.label.cordis":         "创作者模式",
 	"mode.label.minimal":        "极简模式",
 	"mode.label.standard":       "标准模式",

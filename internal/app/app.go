@@ -491,6 +491,7 @@ func (a *App) CreateSession(ctx context.Context, req protocol.SessionCreateReque
 			req.WorkspaceId, req.Cwd = ws.WorkspaceId, ""
 		}
 	}
+	a.pinDefaultPreset(ctx, &req)
 	resp, err := a.cli.CreateSession(ctx, req)
 	if err != nil {
 		return "", err
@@ -512,6 +513,40 @@ func (a *App) CreateSession(ctx context.Context, req protocol.SessionCreateReque
 	}
 	a.refreshRosterCoalesced()
 	return resp.SessionId, nil
+}
+
+// pinDefaultPreset pins a valid preset id on a create request that names
+// none, when the host's configured default no longer resolves: the roster
+// flags its default row, so a roster without one carries a stale default
+// (a preset id an upgrade renamed or the user deleted) that would reject
+// the whole create. Pins standard (the deployment's own base default) or
+// the first intact row; an unreadable roster (no preset capability) leaves
+// the request to the host.
+func (a *App) pinDefaultPreset(ctx context.Context, req *protocol.SessionCreateRequest) {
+	if req.AgentPreset != "" {
+		return
+	}
+	res, err := a.Presets(ctx)
+	if err != nil || len(res.Presets) == 0 {
+		return
+	}
+	for i := range res.Presets {
+		if res.Presets[i].IsDefault {
+			return
+		}
+	}
+	for i := range res.Presets {
+		if res.Presets[i].Id == "standard" && res.Presets[i].Broken == "" {
+			req.AgentPreset = res.Presets[i].Id
+			return
+		}
+	}
+	for i := range res.Presets {
+		if res.Presets[i].Broken == "" {
+			req.AgentPreset = res.Presets[i].Id
+			return
+		}
+	}
 }
 
 // WorkspaceCreate registers an existing directory as a workspace

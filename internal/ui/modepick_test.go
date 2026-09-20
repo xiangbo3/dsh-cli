@@ -22,7 +22,7 @@ import (
 func modeRoster() []protocol.AgentPresetEntry {
 	return []protocol.AgentPresetEntry{
 		{Id: "standard", Trust: "system", IsDefault: true, Name: "标准模式", Description: "功能完整的编码 Agent。"},
-		{Id: "code", Trust: "system", Name: "PTC 模式", Description: "Code Mode SDK。"},
+		{Id: "ptc", Trust: "system", Name: "PTC 模式", Description: "Code Mode SDK。"},
 		{Id: "minimal", Trust: "system"},
 		{Id: "cordis", Trust: "system"},
 		{Id: "my-kit", Trust: "user", Name: "My Toolkit", Description: "a user preset"},
@@ -43,7 +43,7 @@ func TestTopBarModeLabel(t *testing.T) {
 	m.W, m.H = 140, 40
 
 	m.st.SetSessions([]protocol.SessionSummary{
-		{SessionId: "s1", AgentPreset: "code"},
+		{SessionId: "s1", AgentPreset: "ptc"},
 		{SessionId: "s2"},
 	})
 	m.st.SetActive("s1")
@@ -67,7 +67,7 @@ func TestModePickerView(t *testing.T) {
 	m := NewModel(a)
 	m.splashOff = true
 	m.W, m.H = 140, 40
-	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", AgentPreset: "code"}})
+	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", AgentPreset: "ptc"}})
 	m.st.SetActive("s1")
 
 	pk := &modePicker{presets: modeRoster(), cur: 1}
@@ -110,7 +110,7 @@ func TestModePickerView(t *testing.T) {
 		t.Fatalf("ran-session hint missing: %q", pk.hint())
 	}
 
-	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Blank: true, AgentPreset: "code"}})
+	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Blank: true, AgentPreset: "ptc"}})
 	body = strings.Join(pk.view(m, 120, 40), "\n")
 	if !strings.Contains(pk.hint(), "applies to this session") {
 		t.Fatalf("blank-session hint missing: %q / %s", pk.hint(), body)
@@ -149,7 +149,7 @@ func newModeTestServer(t *testing.T) *modeTestServer {
 			fmt.Fprint(w, `{"type":"server-response","result":{"ok":true,"value":{`+
 				`"presets":[`+
 				`{"id":"standard","trust":"system","isDefault":true},`+
-				`{"id":"code","trust":"system"},`+
+				`{"id":"ptc","trust":"system"},`+
 				`{"id":"minimal","trust":"system"},`+
 				`{"id":"cordis","trust":"system"}`+
 				`],"authorable":true,"hasDocument":true}}}`)
@@ -171,7 +171,7 @@ func newModeTestServer(t *testing.T) *modeTestServer {
 			ms.created = append(ms.created, p.AgentPreset)
 			ms.cwd = append(ms.cwd, p.Cwd)
 			ms.workspace = append(ms.workspace, p.WorkspaceId)
-			fmt.Fprint(w, `{"type":"server-response","result":{"ok":true,"value":{"sessionId":"s9","agentPreset":"code"}}}`)
+			fmt.Fprint(w, `{"type":"server-response","result":{"ok":true,"value":{"sessionId":"s9","agentPreset":"ptc"}}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -193,16 +193,16 @@ func TestModePickBlankApplies(t *testing.T) {
 	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Blank: true, AgentPreset: "standard"}})
 	m.st.SetActive("s1")
 
-	entry := protocol.AgentPresetEntry{Id: "code", Trust: "system"}
+	entry := protocol.AgentPresetEntry{Id: "ptc", Trust: "system"}
 	if err := m.applyModePick(context.Background(), "s1", &entry); err != nil {
 		t.Fatalf("applyModePick: %v", err)
 	}
-	if want := "code"; ms.selectGot["s1"] != want {
+	if want := "ptc"; ms.selectGot["s1"] != want {
 		t.Fatalf("agentPreset.select got %q, want %q", ms.selectGot["s1"], want)
 	}
 	snap := m.st.Get("s1")
-	if snap.Summary.AgentPreset != "code" {
-		t.Fatalf("store preset = %q, want code", snap.Summary.AgentPreset)
+	if snap.Summary.AgentPreset != "ptc" {
+		t.Fatalf("store preset = %q, want ptc", snap.Summary.AgentPreset)
 	}
 	if m.stagedMode != "" {
 		t.Fatalf("stagedMode = %q after in-place apply", m.stagedMode)
@@ -235,7 +235,7 @@ func TestModePickStagesWhenRan(t *testing.T) {
 	}
 
 	// Picking the mode the session already runs clears any stage.
-	m.stagedMode = "code"
+	m.stagedMode = "ptc"
 	same := protocol.AgentPresetEntry{Id: "standard", Trust: "system"}
 	if err := m.applyModePick(context.Background(), "s1", &same); err != nil {
 		t.Fatalf("applyModePick(same): %v", err)
@@ -265,14 +265,14 @@ func TestNewSessionConsumesStagedMode(t *testing.T) {
 	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", AgentPreset: "standard"}})
 	m.st.SetActive("s1")
 
-	m.stagedMode = "code"
+	m.stagedMode = "ptc"
 	cmd := m.cmdNewSession("")
 	msg := cmd()
 	if cm, ok := msg.(createMsg); ok && cm.err != nil {
 		t.Fatalf("create failed: %v", cm.err)
 	}
-	if len(ms.created) != 1 || ms.created[0] != "code" {
-		t.Fatalf("session.create presets = %v, want [code]", ms.created)
+	if len(ms.created) != 1 || ms.created[0] != "ptc" {
+		t.Fatalf("session.create presets = %v, want [ptc]", ms.created)
 	}
 	if m.stagedMode != "" {
 		t.Fatalf("stagedMode = %q after hand-off", m.stagedMode)
@@ -300,14 +300,14 @@ func TestNewSessionInheritsWorkspaceAndMode(t *testing.T) {
 	m.splashOff = true
 	m.st.SetHost(&protocol.HostDescription{Version: "test", Cwd: "/host"})
 	m.st.SetSessions([]protocol.SessionSummary{
-		{SessionId: "s1", Cwd: "/tmp/proj", AgentPreset: "code", UpdatedAt: 1},
+		{SessionId: "s1", Cwd: "/tmp/proj", AgentPreset: "ptc", UpdatedAt: 1},
 	})
 	m.st.SetActive("s1")
 
 	// Bare /new: inherit the current session's workspace and mode.
 	m.cmdNewSession("")()
-	if len(ms.created) != 1 || ms.created[0] != "code" {
-		t.Fatalf("first create presets = %v, want [code]", ms.created)
+	if len(ms.created) != 1 || ms.created[0] != "ptc" {
+		t.Fatalf("first create presets = %v, want [ptc]", ms.created)
 	}
 	if ms.cwd[0] != "/tmp/proj" {
 		t.Fatalf("inherited cwd = %q, want /tmp/proj", ms.cwd[0])
@@ -319,8 +319,8 @@ func TestNewSessionInheritsWorkspaceAndMode(t *testing.T) {
 	if len(ms.cwd) != 2 || ms.cwd[1] != "/elsewhere" {
 		t.Fatalf("explicit cwd = %v, want /elsewhere", ms.cwd)
 	}
-	if ms.created[1] != "code" {
-		t.Fatalf("preset with explicit cwd = %q, want code", ms.created[1])
+	if ms.created[1] != "ptc" {
+		t.Fatalf("preset with explicit cwd = %q, want ptc", ms.created[1])
 	}
 
 	// A cwd owned by a registered workspace travels as the workspace id
@@ -332,8 +332,8 @@ func TestNewSessionInheritsWorkspaceAndMode(t *testing.T) {
 	if len(ms.workspace) != 3 || ms.workspace[2] != "w1" || ms.cwd[2] != "" {
 		t.Fatalf("registered-workspace create = cwd %v workspace %v, want w1 + empty cwd", ms.cwd, ms.workspace)
 	}
-	if ms.created[2] != "code" {
-		t.Fatalf("workspace-inherited preset = %q, want code", ms.created[2])
+	if ms.created[2] != "ptc" {
+		t.Fatalf("workspace-inherited preset = %q, want ptc", ms.created[2])
 	}
 
 	// A session the registry owns but whose summary carries no cwd: the
@@ -364,7 +364,7 @@ func TestNewSessionInheritsWorkspaceAndMode(t *testing.T) {
 }
 
 // TestCmdSelectModeByName pins /mode <name>: the roster is fetched, the
-// alias resolved (ptc -> code), and the switch applied on a blank session.
+// alias resolved onto the shipped id, and the switch applied on a blank session.
 func TestCmdSelectModeByName(t *testing.T) {
 	ms := newModeTestServer(t)
 	a := app.New(ms.srv.URL)
@@ -381,8 +381,8 @@ func TestCmdSelectModeByName(t *testing.T) {
 	if e, ok := msg.(rpcErrMsg); ok {
 		t.Fatalf("cmd error: %v", e.err)
 	}
-	if got := ms.selectGot["s1"]; got != "code" {
-		t.Fatalf("agentPreset.select got %q, want code", got)
+	if got := ms.selectGot["s1"]; got != "ptc" {
+		t.Fatalf("agentPreset.select got %q, want ptc", got)
 	}
 	// Unknown names notify a warning without failing the command.
 	cmd = m.cmdSelectModeByName("nowhere")
@@ -438,7 +438,7 @@ func TestModePickerEnterFlow(t *testing.T) {
 	if pk.cur != 2 { // minimal is index 2 in the served roster
 		t.Fatalf("current row = %d, want 2 (minimal)", pk.cur)
 	}
-	// Move to code and confirm; the returned cmd runs the select RPC.
+	// Move to ptc and confirm; the returned cmd runs the select RPC.
 	pk.cur = 1
 	enterCmd, handled := m.handleModalKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if !handled {
@@ -451,11 +451,11 @@ func TestModePickerEnterFlow(t *testing.T) {
 	if len(m.mods) != 0 {
 		t.Fatal("picker should close after confirming")
 	}
-	if got := ms.selectGot["s1"]; got != "code" {
-		t.Fatalf("agentPreset.select got %q, want code", got)
+	if got := ms.selectGot["s1"]; got != "ptc" {
+		t.Fatalf("agentPreset.select got %q, want ptc", got)
 	}
-	if snap := m.st.Get("s1"); snap.Summary.AgentPreset != "code" {
-		t.Fatalf("store preset = %q, want code", snap.Summary.AgentPreset)
+	if snap := m.st.Get("s1"); snap.Summary.AgentPreset != "ptc" {
+		t.Fatalf("store preset = %q, want ptc", snap.Summary.AgentPreset)
 	}
 }
 

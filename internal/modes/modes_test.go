@@ -15,7 +15,7 @@ import (
 func rosterForTests() []protocol.AgentPresetEntry {
 	return []protocol.AgentPresetEntry{
 		{Id: "standard", Trust: "system", IsDefault: true, Name: "标准模式", Description: "功能完整的编码 Agent。"},
-		{Id: "code", Trust: "system", Name: "PTC 模式", Description: "Code Mode SDK。"},
+		{Id: "ptc", Trust: "system", Name: "PTC 模式", Description: "Code Mode SDK。"},
 		{Id: "minimal", Trust: "system"},
 		{Id: "cordis", Trust: "system"},
 		{Id: "my-kit", Trust: "user", Name: "My Toolkit", Description: "user preset"},
@@ -26,7 +26,7 @@ func rosterForTests() []protocol.AgentPresetEntry {
 func TestLabelShort(t *testing.T) {
 	cases := []struct{ id, want string }{
 		{"standard", "Standard mode"},
-		{"code", "PTC mode"},
+		{"ptc", "PTC mode"},
 		{"minimal", "Minimal mode"},
 		{"cordis", "Creator mode"},
 		{"my-kit", "my-kit"},
@@ -37,8 +37,8 @@ func TestLabelShort(t *testing.T) {
 			t.Errorf("Label(%q) = %q, want %q", c.id, got, c.want)
 		}
 	}
-	if got := Short("code"); got != "ptc" {
-		t.Errorf("Short(code) = %q, want ptc", got)
+	if got := Short("ptc"); got != "ptc" {
+		t.Errorf("Short(ptc) = %q, want ptc", got)
 	}
 	if got := Short("my-kit"); got != "my-kit" {
 		t.Errorf("Short(my-kit) = %q, want my-kit", got)
@@ -51,17 +51,17 @@ func TestStaticID(t *testing.T) {
 		want string
 	}{
 		{"standard", "standard"},
-		{"ptc", "code"},
-		{"PTC", "code"},
-		{"ptc mode", "code"},
-		{"PTC Mode", "code"},
-		{"code", "code"},
+		{"ptc", "ptc"},
+		{"PTC", "ptc"},
+		{"ptc mode", "ptc"},
+		{"PTC Mode", "ptc"},
+		{"code", "code"}, // a pre-rename id now passes through
 		{"minimal", "minimal"},
 		{"creator", "cordis"},
 		{"Creator mode", "cordis"},
 		{"cordis", "cordis"},
 		{"my-custom", "my-custom"}, // roster-unknown ids pass through
-		{"  ptc  ", "code"},
+		{"  ptc  ", "ptc"},
 		{"", ""},
 	}
 	for _, c := range cases {
@@ -95,10 +95,9 @@ func TestResolve(t *testing.T) {
 		{"standard", "standard"},
 		{"standard mode", "standard"},
 		{"Standard Mode", "standard"},
-		{"ptc", "code"},
-		{"PTC", "code"},
-		{"PTC mode", "code"},
-		{"code", "code"},
+		{"ptc", "ptc"},
+		{"PTC", "ptc"},
+		{"PTC mode", "ptc"},
 		{"minimal", "minimal"},
 		{"Minimal mode", "minimal"},
 		{"creator", "cordis"},
@@ -141,8 +140,8 @@ func TestNameDescription(t *testing.T) {
 	if got := Name(byID["standard"]); got != "Standard mode" {
 		t.Errorf("Name(standard) = %q", got)
 	}
-	if got := Description(byID["code"]); got != "All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program." {
-		t.Errorf("Description(code) = %q", got)
+	if got := Description(byID["ptc"]); got != "All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program." {
+		t.Errorf("Description(ptc) = %q", got)
 	}
 	// Shipped preset without published metadata still gets copy.
 	if got := Name(byID["minimal"]); got != "Minimal mode" {
