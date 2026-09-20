@@ -19,6 +19,31 @@ import (
 	"github.com/muesli/termenv"
 )
 
+// TestDockToggleKey pins the dock's toggle chord: ctrl+t opens and re-closes
+// (it needs an empty input; ctrl+b stayed the editor's cursor-left).
+func TestDockToggleKey(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	m := NewModel(app.New("http://127.0.0.1:3999"))
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if m.dockVisible {
+		t.Fatal("dock must start closed")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if !m.dockVisible {
+		t.Fatal("ctrl+t must open the dock")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if m.dockVisible {
+		t.Fatal("ctrl+t must close the dock")
+	}
+	// A non-empty input waits for the editor: the chord must not toggle.
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if m.dockVisible {
+		t.Fatal("ctrl+t must not toggle the dock with a non-empty input")
+	}
+}
+
 // dockProbeModel builds a 100x30 model whose session content carries every
 // line shape that broke the old grid: a short styled line (the assistant
 // header), a wrapped body line, and wide overruns (a fenced code block and
@@ -51,7 +76,7 @@ func dockProbeModel(t *testing.T) *Model {
 	return m
 }
 
-// TestDockFrameGridExact is the dock drift regression: with the ctrl+b dock
+// TestDockFrameGridExact is the dock drift regression: with the ctrl+t dock
 // open, the composed frame is a grid of exact columns — every line spans
 // exactly W cells, the gutter column is blank on every main row, and the
 // dock region of each main row equals the standalone dock render cell for

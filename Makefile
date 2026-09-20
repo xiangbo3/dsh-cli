@@ -52,7 +52,7 @@ build: .gotmp .gocache
 # Artifact version: extracted from the source (single source of truth).
 VERSION   := $(shell sed -n 's/.*const Version = "\([^"]*\)".*/\1/p' internal/version/version.go)
 RELEASE_DIR ?= releases
-PLATFORMS   ?= linux/amd64 linux/386 darwin/amd64 darwin/arm64 freebsd/amd64 freebsd/386 openbsd/amd64 openbsd/386 netbsd/amd64 netbsd/386 dragonfly/amd64 windows/amd64 windows/386
+PLATFORMS   ?= linux/amd64 linux/386 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64 freebsd/386 freebsd/arm64 openbsd/amd64 openbsd/386 openbsd/arm64 netbsd/amd64 netbsd/386 netbsd/arm64 dragonfly/amd64 windows/amd64 windows/386
 
 release: .gotmp .gocache
 	@mkdir -p $(RELEASE_DIR)

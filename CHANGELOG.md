@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.0.48
+
+### Fixed
+
+- Fixed keybinding failures under tmux (extended keys, csi-u): once
+  dsh-cli requests modifyOtherKeys2, tmux re-encodes modified keys into kitty CSI-u,
+  which the v1 key reader didn't know, so every chord (ctrl+t, ctrl+h,
+  ctrl+c, alt+enter, copy/paste) died silently. A general CSI-u decoder now
+  shares one (mods, sym) mapping table with the modifyOtherKeys2 decoder
+  (one table, both protocols), folding in the old csiuChord / csiuShiftEnter
+  cases. The dock moved off ctrl+b (the editor's cursor-left) to ctrl+t.
+  `TestCsiuKey`, `TestTmuxCsiuFlow`, `TestDockToggleKey` pin it.
+- Fixed copy/paste failures (three independent causes): (1) outside a full
+  desktop session the native clipboard tools failed (missing XDG_RUNTIME_DIR)
+  — `ensureClipEnv()`
+  now supplies the standard runtime path; (2) every copy/paste parked the
+  terminal and dropped mouse tracking, so the first copy handed selection to
+  the terminal's native and the next ctrl+shift+c copied nothing — now crush's
+  no-park pattern (dual-channel copy: OSC 52 + native tool; paste reads the
+  native tool); (3) foot's default `[key-bindings]` bound the chords to its
+  own clipboard — dsh-cli now requests XTerm modifyOtherKeys2 and decodes its
+  reports (foot users: drop `Control+Shift+c` / `Control+Shift+v` from
+  `[key-bindings]`). Text selection now auto-copies on release (crush's
+  pattern); ctrl+shift+c stays the explicit repeat.
+  `TestClipboardNoTerminalPark`, `TestCopyPasteChords`, `TestMok2Key`,
+  `TestMousePickFlow` pin it.
+
+### Changed
+
+- Popups (help, model, search, question, approval, rename, language, session list) now sit as solid cards in the main window's own background color: the system-derived palette takes the terminal's reported background, the built-in profiles paint the terminal's default background (SGR 49) — no text shows through the box, and the box no longer shifts color against the main area; the hairline frame stays. The SGR scan treats an explicit default background as a painted surface (opaque), not a hole. `TestPopupOpaqueCard` pins it.
+
+## 1.0.48
+
+### 修复
+
+- 修复 Tmux 下快捷键失效问题（扩展键、csi-u）：dsh-cli 请求 modifyOtherKeys2 后，
+  tmux 把修饰键重编码为 kitty CSI-u，v1 键解析器不认识，所有和弦
+  （ctrl+t、ctrl+h、ctrl+c、alt+enter、复制/粘贴）被静默吞掉。新增通用
+  CSI-u 解码器，与 modifyOtherKeys2 解码器共享一张 (mods, sym) 映射表
+  （一张表通吃两种协议），并入原 csiuChord / csiuShiftEnter 特例。侧栏
+  切换从 ctrl+b（编辑器光标左移）移到 ctrl+t。
+  `TestCsiuKey`、`TestTmuxCsiuFlow`、`TestDockToggleKey` 锁定。
+- 修复复制粘贴功能失效（三层原因）：(1) 非完整桌面会话下原生剪贴板工具因缺 XDG_RUNTIME_DIR
+  失败——`ensureClipEnv()` 现补上标准运行时路径；(2) 每次复制/粘贴都挂起
+  终端并丢失鼠标跟踪，首次复制后选区交给终端原生、下次 ctrl+shift+c 便
+  复制不到——现按 crush 模式不挂起（双通道复制：OSC 52 + 原生工具，粘贴
+  读原生工具）；(3) foot 默认 `[key-bindings]` 把和弦绑给了它自己的剪贴板
+  ——dsh-cli 现请求 XTerm modifyOtherKeys2 并解码其报告（foot 用户：从
+  `[key-bindings]` 移除 `Control+Shift+c` / `Control+Shift+v`）。选中文本
+  松开即自动复制（crush 模式）；ctrl+shift+c 保留为显式重复。
+  `TestClipboardNoTerminalPark`、`TestCopyPasteChords`、`TestMok2Key`、
+  `TestMousePickFlow` 锁定。
+
+### 改进
+
+- 弹出窗口（帮助、模型、搜索、问题、批准、重命名、语言、会话列表）背景现为与主窗口自身背景同色的实体卡片：系统派生配色取终端报告的背景色，内置配色绘终端默认背景（SGR 49）——文字背后不再透出，盒子不再与主区域色差，保留细线边框。SGR 解析把显式默认背景视为已绘制的表面（不透明）而非透明洞。`TestPopupOpaqueCard` 锁定。
+
 ## 1.0.47
 
 ### Fixed

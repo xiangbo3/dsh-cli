@@ -278,13 +278,17 @@ func runTUI(ctx context.Context, o oneoff.Opts, resCh <-chan webhost.Result) {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "dsh-cli panicked: %v\n", r)
 			debug.PrintStack()
-			fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?25h") // leave alt-screen, show cursor
+			// leave alt-screen, show cursor, drop modifyOtherKeys2
+			fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?25h\x1b[>4m")
 			exit(1)
 		}
 	}()
 	if _, err := prog.Run(); err != nil {
 		fatalf("tui: %v", err)
 	}
+	// The next app in this terminal (the shell) should not have to
+	// decode modifyOtherKeys2: drop the mode dsh-cli turned on in Init.
+	fmt.Fprint(os.Stdout, "\x1b[>4m")
 }
 
 func runOneShot(ctx context.Context, o oneoff.Opts, prompt string) {

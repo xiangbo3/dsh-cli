@@ -240,14 +240,17 @@ func TestInputMousePickFlow(t *testing.T) {
 		m.Update(tea.MouseMsg{X: 1 + ind + col, Y: m.inpY + 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 		m.Update(tea.MouseMsg{X: 1 + ind + col, Y: m.inpY + 1, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
 	}
-	drag := func(from, to int) {
+	drag := func(from, to int) tea.Cmd {
 		m.Update(tea.MouseMsg{X: 1 + ind + from, Y: m.inpY + 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 		m.Update(tea.MouseMsg{X: 1 + ind + to, Y: m.inpY + 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
-		m.Update(tea.MouseMsg{X: 1 + ind + to, Y: m.inpY + 1, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+		_, cmd := m.Update(tea.MouseMsg{X: 1 + ind + to, Y: m.inpY + 1, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+		return cmd
 	}
 
-	// A drag: the pick survives the release (copy is explicit).
-	drag(2, 7)
+	// A drag: the release auto-copies the pick, which survives it.
+	if cmd := drag(2, 7); cmd == nil {
+		t.Fatalf("release must auto-copy the input pick: %v", cmd)
+	}
 	if !m.inp.selActive() || m.inp.selText() != "llo w" || m.inpDrag {
 		t.Fatalf("drag: active=%v text=%q drag=%v", m.inp.selActive(), m.inp.selText(), m.inpDrag)
 	}
@@ -344,7 +347,9 @@ func TestModalFieldMousePick(t *testing.T) {
 	y := py + 2 + fields[0].row
 	m.Update(tea.MouseMsg{X: startX + 2, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m.Update(tea.MouseMsg{X: startX + 5, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
-	m.Update(tea.MouseMsg{X: startX + 5, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+	if _, cmd := m.Update(tea.MouseMsg{X: startX + 5, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease}); cmd == nil {
+		t.Fatalf("release must auto-copy the field pick: %v", cmd)
+	}
 	mod := m.topModal().(*renameModal)
 	if !mod.edit.selActive() || mod.edit.selText() != "c d" {
 		t.Fatalf("field drag: active=%v text=%q", mod.edit.selActive(), mod.edit.selText())

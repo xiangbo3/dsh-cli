@@ -5,7 +5,6 @@ package ui
 
 import (
 	"context"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -39,15 +38,6 @@ func parseHex(t *testing.T, s string) colorful.Color {
 	return c
 }
 
-// hueDist is the shortest angular distance between two hue degrees.
-func hueDist(a, b float64) float64 {
-	d := math.Mod(a-b+360, 360)
-	if d > 180 {
-		d = 360 - d
-	}
-	return d
-}
-
 func TestSystemPaletteDark(t *testing.T) {
 	// A tinted (blue-gray) dark theme, e.g. GitHub-dark.
 	th := sysTheme(t, "#0d1117", "#c9d1d9")
@@ -59,27 +49,17 @@ func TestSystemPaletteDark(t *testing.T) {
 	if th.CBarBG != "" {
 		t.Fatalf("bar surface %s should be transparent", th.CBarBG)
 	}
-	themeHue, _, _ := parseHex(t, "#0d1117").Hsl()
-	// The raised surfaces stay close to the background...
-	card := parseHex(t, th.CCardBG)
-	ch, cs, _ := card.Hsl()
-	_, _, l := card.Hsl()
-	if l < 0.02 || l > 0.25 {
-		t.Fatalf("card surface lightness %.3f not between bg and text", l)
+	// Card surface is the terminal's own background: the popup is a
+	// solid slab in the conversation's color.
+	if th.CCardBG != parseHex(t, "#0d1117").Hex() {
+		t.Fatalf("card surface %s should be the terminal background #0d1117", th.CCardBG)
 	}
-	// ...and keep the theme's hue instead of collapsing to gray.
-	if cs < 0.02 {
-		t.Fatalf("card surface %s unsaturated, theme tint lost", th.CCardBG)
-	}
-	if hueDist(ch, themeHue) > 25 {
-		t.Fatalf("card surface hue %.1f drifts %+.1f from theme hue %.1f", ch, ch-themeHue, themeHue)
-	}
-	// The hierarchy on the ramp must stay ordered.
+	// The raised-surface hierarchy on the ramp must stay ordered.
 	lum := func(c string) float64 { _, _, l := parseHex(t, c).Hsl(); return l }
-	if !(lum(th.CModalBG) < lum(th.CCardBG) && lum(th.CCardBG) < lum(th.CBorder) &&
+	if !(lum(th.CModalBG) < lum(th.CBorder) &&
 		lum(th.CBorder) < lum(th.CFaint) && lum(th.CFaint) < lum(th.CDim) && lum(th.CDim) < lum(th.CFG)) {
-		t.Fatalf("ramp order broken: modal=%.3f card=%.3f border=%.3f faint=%.3f dim=%.3f cfg=%.3f",
-			lum(th.CModalBG), lum(th.CCardBG), lum(th.CBorder), lum(th.CFaint), lum(th.CDim), lum(th.CFG))
+		t.Fatalf("ramp order broken: modal=%.3f border=%.3f faint=%.3f dim=%.3f cfg=%.3f",
+			lum(th.CModalBG), lum(th.CBorder), lum(th.CFaint), lum(th.CDim), lum(th.CFG))
 	}
 	// Body text inherits the terminal's own foreground color.
 	got := parseHex(t, th.CFG)
@@ -110,17 +90,10 @@ func TestSystemPaletteLight(t *testing.T) {
 	if th.CBarBG != "" {
 		t.Fatalf("bar surface %s should be transparent", th.CBarBG)
 	}
-	bgHue, _, bgLum := parseHex(t, "#eef2f8").Hsl()
-	cardHue, cardSat, cardLum := parseHex(t, th.CCardBG).Hsl()
-	// Surfaces are raised plates: darker than the page, tinted like it.
-	if cardLum > bgLum-0.01 {
-		t.Fatalf("card surface lightness %.3f not below the light background %.3f", cardLum, bgLum)
-	}
-	if cardSat < 0.02 {
-		t.Fatalf("card surface %s unsaturated, theme tint lost", th.CCardBG)
-	}
-	if hueDist(cardHue, bgHue) > 25 {
-		t.Fatalf("card surface hue %.1f drifts %.1f from theme hue %.1f", cardHue, hueDist(cardHue, bgHue), bgHue)
+	// Card surface is the terminal's own background: the popup is a
+	// solid slab in the conversation's color.
+	if th.CCardBG != parseHex(t, "#eef2f8").Hex() {
+		t.Fatalf("card surface %s should be the terminal background #eef2f8", th.CCardBG)
 	}
 	// Light theme: body text is the terminal fg, dim is between it and bg.
 	lum := func(c string) float64 { _, _, l := parseHex(t, c).Hsl(); return l }

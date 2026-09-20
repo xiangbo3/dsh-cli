@@ -353,6 +353,15 @@ func (m *Model) Init() tea.Cmd {
 	if !m.splashOff {
 		m.splashStart = time.Now()
 	}
+	// Ask the terminal to report modified keys via XTerm
+	// modifyOtherKeys2 (ESC [ 27 ; mods ; sym ~): on honouring
+	// terminals (foot, xterm, kitty) ctrl+shift+c/v then reach Update
+	// as distinct keys instead of plain ctrl+c/v; others ignore the
+	// mode and the legacy paths keep working. main resets it on exit
+	// so the next app in the terminal is not left decoding it.
+	if m.prog != nil {
+		os.Stdout.WriteString("\x1b[>4;2m")
+	}
 	// Bracketed paste is a command in the v1 reader (no program option):
 	// terminal pastes then arrive as KeyMsgs flagged Paste, folded into
 	// the focused field by handlePaste.
@@ -636,6 +645,12 @@ func (m *Model) resetTrans() {
 
 // Update is the tea model update.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if p := os.Getenv("DSH_MSG_DBG"); p != "" {
+		if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintf(f, "%s %T %s\n", time.Now().Format("15:04.051"), msg, msg)
+			f.Close()
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.W, m.H = msg.Width, msg.Height
@@ -951,26 +966,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 	default:
-		// kitty-protocol chords the v1 reader cannot name: a
-		// ctrl+shift+c/v arrives as ESC[99;3u / ESC[118;3u and
-		// shift+enter as ESC[13;2u, each reported as an unknown CSI
-		// sequence — an unexported []byte-based message, matched
-		// structurally rather than by type.
+		// Chords the v1 reader cannot name, each reported as an
+		// unknown CSI sequence — an unexported []byte-based message,
+		// matched structurally rather than by type. Two protocols carry
+		// them: the XTerm modifyOtherKeys2 form (ESC[27;mods;sym~) a
+		// terminal emits when it honours the mode dsh-cli requests,
+		// and the kitty CSI-u form (ESC[sym;mods u) — what a terminal
+		// sends for chords plain control bytes cannot carry, and what
+		// tmux re-encodes EVERY modified key to once it knows the
+		// client honours extended keys (the MOK2 modifier values are
+		// preserved: ESC[27;6;99~ becomes ESC[99;6u). Both decoders
+		// share one (mods, sym) mapping, so tmuxed and direct
+		// terminals name the same keys.
 		if b := byteMsgOf(msg); b != nil {
-			isCopy, isPaste := csiuChord(b)
-			switch {
-			case isCopy:
-				if m.inpSelActive() {
-					return m, m.inpCopySel()
-				}
-				if m.sel.active {
-					return m, m.copySelection()
-				}
-				return m, nil
-			case isPaste:
-				return m, m.readClipboard()
-			case csiuShiftEnter(b):
+			if csiuShiftEnter(b) || mok2ShiftEnter(b) {
 				return m, m.handleShiftEnter()
+			}
+			if km, ok := mok2Key(b); ok {
+				return m.handleKey(km)
+			}
+			if km, ok := csiuKey(b); ok {
+				return m.handleKey(km)
 			}
 		}
 	}
@@ -991,55 +1007,226 @@ func byteMsgOf(msg tea.Msg) []byte {
 	return nil
 }
 
-// csiuChord reports whether a kitty-protocol CSI-u escape (ESC
-// <keycode> ; <modifier> u) carries the ctrl+shift copy/paste chord:
-// keycode 99/118 ('c'/'v') with the ctrl modifier bit (2) set. Terminals
-// only emit CSI-u for chords plain control bytes cannot carry, so a
-// chord without the ctrl bit is a different key entirely (shift+c is a
-// plain 'c').
-func csiuChord(seq []byte) (isCopy, isPaste bool) {
+// csiuParse decodes a kitty-protocol CSI-u escape (ESC <keycode> ;
+// <modifier> u). The modifier is the modifyOtherKeys number (1 none,
+// 2 shift, 3 alt, 5 ctrl, 6 ctrl+shift, 9..16 super): tmux re-encodes
+// modified keys this way with the MOK2 values preserved, so the values
+// feed modKey unconverted.
+func csiuParse(seq []byte) (sym, mod int, ok bool) {
 	if len(seq) < 4 || seq[0] != '\x1b' || seq[1] != '[' || seq[len(seq)-1] != 'u' {
-		return false, false
+		return 0, 0, false
 	}
 	parts := strings.Split(string(seq[2:len(seq)-1]), ";")
 	if len(parts) != 2 {
-		return false, false
+		return 0, 0, false
 	}
-	code, err1 := strconv.Atoi(string(parts[0]))
+	sym, err1 := strconv.Atoi(string(parts[0]))
 	mod, err2 := strconv.Atoi(string(parts[1]))
-	if err1 != nil || err2 != nil || mod&2 == 0 {
-		return false, false
+	if err1 != nil || err2 != nil || mod < 1 || mod > 16 {
+		return 0, 0, false
 	}
-	switch code {
-	case 99: // 'c'
-		return true, false
-	case 118: // 'v'
-		return false, true
-	}
-	return false, false
+	return sym, mod, true
 }
 
-// csiuShiftEnter reports whether a kitty-protocol CSI-u escape (ESC
-// <keycode> ; <modifier> u) is shift+enter: keycode 13 ('\r') with the
-// shift modifier bit (2) set. The v1 reader has no shift+enter key type,
-// so the protocol's form reaches Update as an unknown CSI sequence.
+// csiuKey decodes a kitty-protocol CSI-u escape the way the legacy
+// bytes would have carried the key — the kitty counterpart of
+// mok2Key, the same (mods, sym) mapping. Under tmux with extended keys
+// this is how EVERY modified key arrives (ctrl+letter, alt+letter,
+// the copy/paste and queue chords, shift+tab, modified arrows from
+// kitty terminals), so a miss here is a silently swallowed keypress.
+func csiuKey(seq []byte) (tea.KeyMsg, bool) {
+	sym, mod, ok := csiuParse(seq)
+	if !ok {
+		return tea.KeyMsg{}, false
+	}
+	return modKey(mod, sym)
+}
+
+// csiuShiftEnter is the kitty-form shift+enter (ESC[13;2u), the CSI-u
+// counterpart of mok2ShiftEnter. Shift alone: alt+enter (mod 3) is the
+// queued-send chord, not a newline, so it falls to csiuKey.
 func csiuShiftEnter(seq []byte) bool {
-	if len(seq) < 4 || seq[0] != '\x1b' || seq[1] != '[' || seq[len(seq)-1] != 'u' {
-		return false
-	}
-	parts := strings.Split(string(seq[2:len(seq)-1]), ";")
-	if len(parts) != 2 {
-		return false
-	}
-	code, err1 := strconv.Atoi(string(parts[0]))
-	mod, err2 := strconv.Atoi(string(parts[1]))
-	return err1 == nil && err2 == nil && code == 13 && mod&2 == 2
+	sym, mod, ok := csiuParse(seq)
+	return ok && mod == 2 && sym == 13
 }
 
-// handleShiftEnter is the kitty-protocol shift+enter (ESC[13;2u): a
-// manual newline in the main input bar — a popup open keeps the key, its
-// fields are one line. The bare-LF form (terminals that send 0x0A for
-// shift+enter) is handled in inputLine.handleKey.
+// mok2Parse decodes an XTerm modifyOtherKeys2 escape (ESC [ 27 ; mods ;
+// sym ~): mods is 1..16 (9..16 carry super), sym the key's codepoint for
+// printables or a keysym value for specials.
+func mok2Parse(seq []byte) (mod, sym int, ok bool) {
+	if len(seq) < 7 || seq[0] != '\x1b' || seq[1] != '[' || seq[2] != '2' ||
+		seq[3] != '7' || seq[4] != ';' || seq[len(seq)-1] != '~' {
+		return 0, 0, false
+	}
+	parts := strings.Split(string(seq[5:len(seq)-1]), ";")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	mod, err1 := strconv.Atoi(parts[0])
+	sym, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || mod < 1 || mod > 16 {
+		return 0, 0, false
+	}
+	return mod, sym, true
+}
+
+// mok2ShiftEnter is the modifyOtherKeys2 shift+enter (ESC[27;2;13~), the
+// MOK2 counterpart of the kitty form ESC[13;2u.
+func mok2ShiftEnter(seq []byte) bool {
+	mod, sym, ok := mok2Parse(seq)
+	return ok && mod == 2 && sym == 13
+}
+
+// mok2Key decodes a modifyOtherKeys2 escape into the key the legacy
+// bytes would have carried: ctrl+letter as its KeyCtrl form, the
+// ctrl+shift (and alt+ctrl) chords as ctrl+Alt — the same convention
+// as the kitty chords. Terminals that honour the mode (foot, xterm,
+// kitty) report ctrl+shift+c/v this way, which is how the copy/paste
+// chords reach Update unambiguous; super is stripped.
+func mok2Key(seq []byte) (tea.KeyMsg, bool) {
+	mod, sym, ok := mok2Parse(seq)
+	if !ok {
+		return tea.KeyMsg{}, false
+	}
+	return modKey(mod, sym)
+}
+
+// modKey maps a (modifier, sym) pair to the key the legacy bytes would
+// have carried — the shared core of mok2Key and csiuKey. The
+// modifyOtherKeys modifier numbers (1 none, 2 shift, 3 alt, 4 alt+shift,
+// 5 ctrl, 6 ctrl+shift, 7 alt+ctrl, 8 all, 9..16 super) apply to both
+// protocols: the terminals that emit the kitty form and tmux, which
+// re-encodes the MOK2 form, keep those values.
+func modKey(mod, sym int) (tea.KeyMsg, bool) {
+	if mod > 8 {
+		mod -= 8
+	}
+	shift := mod == 2 || mod == 4 || mod == 6 || mod == 8
+	// the ctrl+shift chord rides the Alt bit, like the kitty form
+	alt := mod >= 3 && mod != 5
+	ctrl := mod >= 5
+
+	if sym >= 97 && sym <= 122 { // a-z
+		ch := rune(sym)
+		switch {
+		case ctrl:
+			return tea.KeyMsg{Type: tea.KeyType(1 + sym - 97), Alt: alt}, true
+		case alt && shift:
+			return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch - 32}, Alt: true}, true
+		case alt:
+			return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}, Alt: true}, true
+		case shift:
+			return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch - 32}}, true
+		default:
+			return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}, true
+		}
+	}
+	switch sym {
+	case 1, 2, 3, 4: // arrows (kitty keysyms; MOK2 keeps them legacy)
+		var plain, shifted, controlled tea.KeyType
+		switch sym {
+		case 1:
+			plain, shifted, controlled = tea.KeyUp, tea.KeyShiftUp, tea.KeyCtrlUp
+		case 2:
+			plain, shifted, controlled = tea.KeyDown, tea.KeyShiftDown, tea.KeyCtrlDown
+		case 3:
+			plain, shifted, controlled = tea.KeyRight, tea.KeyShiftRight, tea.KeyCtrlRight
+		case 4:
+			plain, shifted, controlled = tea.KeyLeft, tea.KeyShiftLeft, tea.KeyCtrlLeft
+		}
+		switch {
+		case ctrl:
+			return tea.KeyMsg{Type: controlled, Alt: alt}, true
+		case alt:
+			return tea.KeyMsg{Type: plain, Alt: true}, true
+		case shift:
+			return tea.KeyMsg{Type: shifted}, true
+		default:
+			return tea.KeyMsg{Type: plain}, true
+		}
+	case 5, 6: // pgup / pgdown
+		var kt tea.KeyType
+		if sym == 5 {
+			kt = tea.KeyPgUp
+		} else {
+			kt = tea.KeyPgDown
+		}
+		return tea.KeyMsg{Type: kt, Alt: alt}, true
+	case 7, 8: // home / end
+		var kt tea.KeyType
+		if sym == 7 {
+			kt = tea.KeyHome
+		} else {
+			kt = tea.KeyEnd
+		}
+		return tea.KeyMsg{Type: kt, Alt: alt}, true
+	case 10: // kitty's delete keysym
+		return tea.KeyMsg{Type: tea.KeyDelete, Alt: alt}, true
+	case 13: // enter
+		if mod == 2 {
+			return tea.KeyMsg{}, false // shift+enter: mok2ShiftEnter
+		}
+		return tea.KeyMsg{Type: tea.KeyEnter, Alt: alt}, true
+	case 9: // tab
+		if shift && !ctrl && !alt {
+			return tea.KeyMsg{Type: tea.KeyShiftTab}, true
+		}
+		return tea.KeyMsg{Type: tea.KeyTab, Alt: alt}, true
+	case 27:
+		return tea.KeyMsg{Type: tea.KeyEsc, Alt: alt}, true
+	case 127:
+		return tea.KeyMsg{Type: tea.KeyBackspace, Alt: alt}, true
+	case 32: // space
+		if ctrl {
+			return tea.KeyMsg{Type: tea.KeyCtrlAt}, true
+		}
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}, Alt: alt}, true
+	case 63, 91, 92, 93, 94, 95: // ? [ \ ] ^ _
+		if ctrl {
+			var kt tea.KeyType
+			switch sym {
+			case 63:
+				kt = tea.KeyCtrlQuestionMark
+			case 91:
+				kt = tea.KeyCtrlOpenBracket
+			case 92:
+				kt = tea.KeyCtrlBackslash
+			case 93:
+				kt = tea.KeyCtrlCloseBracket
+			case 94:
+				kt = tea.KeyCtrlCaret
+			case 95:
+				kt = tea.KeyCtrlUnderscore
+			}
+			return tea.KeyMsg{Type: kt}, true
+		}
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(sym)}, Alt: alt}, true
+	}
+	if sym >= 48 && sym <= 57 { // digits
+		b := sym - 48
+		if ctrl { // legacy ctrl+digit control bytes
+			switch b {
+			case 8:
+				return tea.KeyMsg{Type: tea.KeyBackspace, Alt: alt}, true
+			case 9:
+				return tea.KeyMsg{Type: tea.KeyTab, Alt: alt}, true
+			default:
+				return tea.KeyMsg{Type: tea.KeyType(b), Alt: alt}, true
+			}
+		}
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune('0' + b)}, Alt: alt}, true
+	}
+	if sym >= 33 && sym <= 126 { // other printables
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(sym)}, Alt: alt}, true
+	}
+	return tea.KeyMsg{}, false // F keys and kitty's big keysyms: swallow
+}
+
+// handleShiftEnter is shift+enter — the kitty form (ESC[13;2u) and the
+// modifyOtherKeys2 form (ESC[27;2;13~): a manual newline in the main
+// input bar — a popup open keeps the key, its fields are one line. The
+// bare-LF form (terminals that send 0x0A for shift+enter) is handled in
+// inputLine.handleKey.
 func (m *Model) handleShiftEnter() tea.Cmd {
 	if m.topModal() != nil || m.sideVisible {
 		return nil
@@ -1252,6 +1439,11 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if km.Type == tea.KeyCtrlC && m.inpSelActive() {
 			return m, m.inpCopySel()
 		}
+		// The paste chord answers too (crush's ctrl+shift+v reaches the
+		// dialog's editor): the replay routes to the topmost field.
+		if km.Type == tea.KeyCtrlV {
+			return m, m.readClipboard()
+		}
 		return m, nil
 	}
 
@@ -1327,10 +1519,10 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// crush's explicit copy chord: ctrl+shift+c. A terminal that
 	// reports the shift modifier delivers it as ctrl+c with the Alt bit
 	// (alacritty forwards ESC+ctrl-char and tmux re-sends M-C-c; the v1
-	// reader parses both the same); a kitty-protocol terminal sends CSI-u
-	// (ESC[99;3u), which Update's default case routes here. The explicit
-	// chord copies even with a non-empty input — plain ctrl+c below must
-	// keep its clear/quit duty.
+	// reader parses both the same); a kitty-protocol terminal or tmux's
+	// CSI-u re-encode sends ESC[99;6u, which csiuKey decodes to this
+	// same key. The explicit chord copies even with a non-empty input —
+	// plain ctrl+c below must keep its clear/quit duty.
 	case km.Type == tea.KeyCtrlC && km.Alt:
 		if m.inpSelActive() {
 			return m, m.inpCopySel()
@@ -1359,7 +1551,8 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// tell): read the system clipboard and replay it as a paste,
 		// so it shares the path with the terminal's bracketed paste.
 		return m, m.readClipboard()
-	case km.Type == tea.KeyCtrlB && emptyInput:
+	case km.Type == tea.KeyCtrlT && emptyInput:
+		// Dock toggle — moved off ctrl+b, the editor's cursor-left.
 		m.dockVisible = !m.dockVisible
 		return m, nil
 	case km.Type == tea.KeyCtrlN && emptyInput:
@@ -1679,18 +1872,23 @@ func (m *Model) handleMouse(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.sel.dragTo(m.transOffset()+row, col)
 		return m, nil
 	case tea.MouseActionRelease:
-		// Settle an in-progress input drag (a click that never moved is a
-		// plain caret; a drag keeps its range), keeping the pick
-		// highlighted; copy is explicit, esc clears.
+		// Settle an in-progress drag and auto-copy the settled pick
+		// (crush copies on release): a click that never moved is a
+		// plain caret and copies nothing. The explicit chord stays the
+		// repeat until the pick is cleared.
 		if m.dragEdit != nil {
+			ed := m.dragEdit
 			m.dragEdit.mouseRelease()
 			m.dragEdit = nil
+			if ed.selActive() {
+				return m, ed.copySel(m)
+			}
 			return m, nil
 		}
 		if m.inpDrag {
 			m.inp.mouseRelease()
 			m.inpDrag = false
-			return m, nil
+			return m, m.inp.copySel(m)
 		}
 		// A release reports either with no button (X10-style cb=3) or
 		// still carrying the released one: the alacritty/tmux SGR stream
@@ -1703,6 +1901,9 @@ func (m *Model) handleMouse(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.sel.down = false
+		if m.sel.active && m.selectionText() != "" {
+			return m, m.copySelection()
+		}
 		return m, nil
 	}
 	return m, nil
@@ -1888,18 +2089,37 @@ func (m *Model) transRowAt(x, y int) (row, col int, ok bool) {
 	return row, col, true
 }
 
-// copyText pushes text to the clipboard: through a clipboard binary
-// where one exists, else OSC 52 (crush uses a clipboard library; the
-// TUI keeps the binary + OSC 52 fallback so it needs no CGO). Shared by
-// the transcript pick and every input pick; the clipDoneMsg reply toasts
-// the channel that carried the text.
+// copyText pushes text to the clipboard on crush's two channels:
+// OSC 52 (the terminal's clipboard — one plain write, since v1 has no
+// tea.SetClipboard) and the native tool (xclip / wl-copy / pbcopy).
+// Both run in this cmd's own goroutine instead of parking the terminal
+// in tea.Exec — bubbletea v1's terminal release disables mouse cell
+// motion without restoring it, so a parked copy would hand selection
+// drags to the terminal's native highlight and blind the in-app pick.
+// Shared by the transcript pick and every input pick; the clipDoneMsg
+// reply toasts the native channel's outcome (OSC 52 alone when no tool
+// exists).
 func (m *Model) copyText(text string) tea.Cmd {
 	if text == "" {
 		m.addToast(core.Notice{Level: "info", Text: "copied nothing (empty pick)"})
 		return nil
 	}
 	chars := len([]rune(text))
-	if t := findClipTool(); t.path != "" {
+	osc := osc52Payload(text)
+	var t clipTool
+	if x := findClipTool(); x.path != "" {
+		t = x
+		ensureClipEnv()
+	}
+	return func() tea.Msg {
+		// OSC 52 channel: one atomic write, best effort when the native
+		// tool runs too (crush sends both).
+		if _, err := os.Stdout.Write([]byte(osc)); err != nil && t.path == "" {
+			return clipDoneMsg{via: "OSC 52", chars: chars, err: err}
+		}
+		if t.path == "" {
+			return clipDoneMsg{via: "OSC 52", chars: chars}
+		}
 		cmd := exec.Command(t.path, t.args...)
 		cmd.Stdin = strings.NewReader(text)
 		// The tool (xclip/wl-copy) may daemonize to serve the selection;
@@ -1910,14 +2130,8 @@ func (m *Model) copyText(text string) tea.Cmd {
 		if null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
 			cmd.Stdout, cmd.Stderr = null, null
 		}
-		return tea.ExecProcess(cmd, func(err error) tea.Msg {
-			return clipDoneMsg{via: baseName(t.path), chars: chars, err: err}
-		})
+		return clipDoneMsg{via: baseName(t.path), chars: chars, err: cmd.Run()}
 	}
-	osc := oscCmd{payload: osc52Payload(text)}
-	return tea.Exec(osc, func(error) tea.Msg {
-		return clipDoneMsg{via: "OSC 52", chars: chars}
-	})
 }
 
 // selectionText is the active pick's plain text ("" for a zero-size
@@ -2001,29 +2215,34 @@ func (m *Model) copySelection() tea.Cmd {
 }
 
 // readClipboard fetches the system clipboard with a read tool (if one
-// exists) and replays it as a paste message — crush's pattern — so the
-// explicit paste key and the terminal's bracketed paste share one path.
-// A missing tool or a read failure toasts; an empty clipboard reports
-// its own clipReadMsg.
+// exists) and replays it as a paste message — crush's
+// pasteTextFromClipboard pattern: the tool runs in this cmd's own
+// goroutine, so the terminal is never parked and the explicit paste key
+// and the terminal's bracketed paste share one path. A missing tool or
+// a read failure toasts; an empty clipboard reports its own clipReadMsg.
 func (m *Model) readClipboard() tea.Cmd {
 	t := findClipReadTool()
 	if t.path == "" {
 		m.addToast(core.Notice{Level: "warn", Text: "no clipboard reader (xclip / wl-paste / pbpaste)"})
 		return nil
 	}
+	ensureClipEnv()
 	cmd := exec.Command(t.path, t.args...)
 	var out strings.Builder
 	cmd.Stdout = &out
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
+	return func() tea.Msg {
+		if err := cmd.Run(); err != nil {
 			return clipReadMsg{err: err}
 		}
-		text := out.String()
+		// Selection tools (xclip, wl-paste) answer a line-oriented pick
+		// with a trailing newline; drop the one so the paste does not
+		// grow a phantom line.
+		text := strings.TrimSuffix(out.String(), "\n")
 		if strings.TrimSpace(text) == "" {
 			return clipReadMsg{}
 		}
 		return pasteTextMsg{text}
-	})
+	}
 }
 
 // handlePaste folds one paste (a bracketed paste from the terminal, or

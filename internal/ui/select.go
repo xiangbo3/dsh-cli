@@ -6,7 +6,6 @@ package ui
 import (
 	"encoding/base64"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -110,10 +109,11 @@ func (s *textSel) selectLine(line, width int) {
 // sgrState is a terminal cell's style state: the attribute bits a
 // terminal tracks plus the foreground/background as the raw SGR parameter
 // lists that set them (plain [31], 8-bit [38;5;n], truecolor
-// [38;2;r;g;b]). The row scan and the band speak only this state, so a
-// styled row re-emits each cell under the style it carries — the same
-// cell-level surgery crush does with ultraviolet's ScreenBuffer, without
-// the dependency.
+// [38;2;r;g;b]). bg [49] is the explicit default background: a painted
+// surface, opaque in the splice, unlike an empty bg (a bare hole). The
+// row scan and the band speak only this state, so a styled row re-emits
+// each cell under the style it carries — the same cell-level surgery
+// crush does with ultraviolet's ScreenBuffer, without the dependency.
 type sgrState struct {
 	bold, dim, italic, underline     bool
 	blink, inverse, strike, overline bool
@@ -188,12 +188,12 @@ func (s *sgrState) apply(p []int) {
 			s.overline = false
 		case 39:
 			s.fg = nil
-		case 49:
-			s.bg = nil
+		case 49, 109:
+			// Explicit default background: a painted surface (opaque in
+			// the splice), distinct from an empty bg (a bare hole).
+			s.bg = []int{49}
 		case 99:
 			s.fg = nil
-		case 109:
-			s.bg = nil
 		case 38, 48:
 			// 38;5;n or 38;2;r;g;b (48 is the background twin).
 			target := &s.fg
@@ -572,18 +572,23 @@ func findClipReadTool() clipTool {
 	return clipTool{}
 }
 
+// ensureClipEnv makes the native clipboard tools (wl-paste / wl-copy / xclip)
+// find the user's runtime directory. They need XDG_RUNTIME_DIR to locate the
+// Wayland/X11 socket, but it is only set inside a full desktop session, which is
+// absent when dsh-cli is launched from a daemon, harness, or CI. We set it to
+// the standard /run/user/<uid> path when missing. We mutate the process
+// environment (not the command's env) so the child inherits the full live env
+// (WAYLAND_DISPLAY, DISPLAY, ...) plus the supplied directory.
+func ensureClipEnv() {
+	if os.Getenv("XDG_RUNTIME_DIR") == "" && runtime.GOOS == "linux" {
+		os.Setenv("XDG_RUNTIME_DIR", "/run/user/"+strconv.Itoa(os.Getuid()))
+	}
+}
+
 // osc52Payload encodes text for the terminal's OSC 52 clipboard channel.
 func osc52Payload(text string) string {
 	return fmt.Sprintf("\x1b]52;c;%s\a", base64.StdEncoding.EncodeToString([]byte(text)))
 }
-
-// oscCmd writes its payload once the renderer is parked (tea.Exec).
-type oscCmd struct{ payload string }
-
-func (c oscCmd) Run() error          { _, err := os.Stdout.Write([]byte(c.payload)); return err }
-func (c oscCmd) SetStdin(io.Reader)  {}
-func (c oscCmd) SetStdout(io.Writer) {}
-func (c oscCmd) SetStderr(io.Writer) {}
 
 // baseName is the file name of a path (clipboard binary label for toasts).
 func baseName(p string) string {

@@ -56,6 +56,10 @@ type Theme struct {
 	// CBarBG is the input-bar surface. The built-in palettes leave it
 	// empty: the bar (frame, prompt, text and padding alike) is
 	// transparent and rides the terminal's own background.
+	// CCardBG is the popup/session-window surface: the conversation's own
+	// background (SGR 49 in the built-in palettes, the reported color in
+	// the system one), so the box is a solid slab in the main window's
+	// color with nothing showing through.
 	CBarBG   string
 	CModalBG string
 	CCardBG  string
@@ -300,7 +304,7 @@ func (t *Theme) setPalette() {
 		t.CAccent, t.COK, t.CWarn, t.CErr, t.CInfo = "default", "default", "180", "204", "default"
 		t.CUser, t.CCode = "default", "253"
 		t.CBorder, t.CBarBG, t.CModalBG, t.CCardBG, t.CSysFG =
-			"240", "", "", "", "246"
+			"240", "", "", "default", "246"
 		return
 	}
 	if t.LightBgn {
@@ -308,16 +312,22 @@ func (t *Theme) setPalette() {
 		t.CFG, t.CDim, t.CFaint = "#2D2A25", "#6F6A5F", "#948E80"
 		t.CAccent, t.COK, t.CWarn, t.CErr, t.CInfo = "#C24E14", "#5E7F49", "#8A681F", "#A8492F", "#4D7375"
 		t.CUser, t.CCode = "#C24E14", "#595345"
-		t.CBorder, t.CModalBG, t.CCardBG, t.CSysFG =
-			"#D8D1C2", "#FAF6EC", "#F2ECDD", "#7C766A"
+		t.CBorder, t.CModalBG, t.CSysFG =
+			"#D8D1C2", "#FAF6EC", "#7C766A"
+		// Card surface is the terminal's own background (SGR 49): the
+		// popup is a solid slab in the conversation's color.
+		t.CCardBG = "default"
 		return
 	}
 	// Warm graphite with the Braun orange accent.
 	t.CFG, t.CDim, t.CFaint = "#EDE9E0", "#A8A294", "#67625A"
 	t.CAccent, t.COK, t.CWarn, t.CErr, t.CInfo = "#E85A22", "#8FA671", "#CEA44B", "#C4573B", "#7E9D97"
 	t.CUser, t.CCode = "#FF5900", "#8F8D86"
-	t.CBorder, t.CModalBG, t.CCardBG, t.CSysFG =
-		"#3A362F", "#211F1B", "#262420", "#918B7E"
+	t.CBorder, t.CModalBG, t.CSysFG =
+		"#3A362F", "#211F1B", "#918B7E"
+	// Card surface is the terminal's own background (SGR 49): the
+	// popup is a solid slab in the conversation's color.
+	t.CCardBG = "default"
 }
 
 // applySystem re-derives the palette from a fresh background/foreground
@@ -404,8 +414,11 @@ func (t *Theme) setSystemPalette(bg, fg termenv.Color) {
 	t.CDim, t.CFaint = ramp(0.61), ramp(0.42)
 	t.CCode = ramp(0.62)
 	t.CSysFG = ramp(0.54)
-	t.CBorder, t.CCardBG, t.CModalBG =
-		ramp(0.21), ramp(0.13), ramp(0.08)
+	t.CBorder, t.CModalBG =
+		ramp(0.21), ramp(0.08)
+	// Card surface is the terminal's reported background: the popup is a
+	// solid slab in the conversation's color.
+	t.CCardBG = b.Hex()
 	// The input bar stays transparent on the system surface too: no
 	// painted plate, the text rides the terminal's own background.
 	t.CBarBG = ""
@@ -747,11 +760,12 @@ func (t *Theme) PlateSel() Style {
 
 // ---- card surface (session list panel) --------------------------------------------
 //
-// The session list floats on the card surface (CCardBG). The same reset
-// problem as the input bar applies: every segment — including the plain
-// gaps between styled spans and the trailing padding — bakes the card
-// background into its own style, so no cell of the open panel falls back
-// to the terminal's default background.
+// The session list floats on the card surface (CCardBG), the
+// conversation's own background. Styled segments bake the surface into
+// their own style where a concrete color exists; on the "default"
+// surface the popup's row filler (cardLine) paints every cell the row
+// leaves without a background, so no cell of the open panel stays a
+// bare hole the underlying screen shows through.
 
 // Card is the bare card surface, used for padding.
 func (t *Theme) Card() Style {
@@ -764,8 +778,12 @@ func (t *Theme) Card() Style {
 // CardState is the card surface as the SGR state a cell carries (the
 // empty state when the palette has no card color): the popup's row
 // filler merges it into every cell the row leaves without a background,
-// so the box interior is opaque.
+// so the box interior is opaque. "default" is SGR 49 — lipgloss renders
+// it as no code at all, so the state is built by hand.
 func (t *Theme) CardState() sgrState {
+	if t.CCardBG == "default" {
+		return sgrState{bg: []int{49}}
+	}
 	return extractSGR(t.Card().Render("x"))
 }
 

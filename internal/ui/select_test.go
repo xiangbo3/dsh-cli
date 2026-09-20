@@ -282,7 +282,7 @@ func TestWordBounds(t *testing.T) {
 
 // TestMousePickFlow drives the crush-style gesture on a rendered model:
 // a press anchors a cell (zero-size, no band, no copy), a drag extends to
-// a cell endpoint (the release settles the pick; the copy is explicit),
+// a cell endpoint (the release settles the pick and auto-copies it),
 // a double-click selects the word, a triple-click the whole line, esc
 // clears, ctrl+c copies, a press off the pane drops the pick, and the
 // wheel still scrolls.
@@ -325,8 +325,11 @@ func TestMousePickFlow(t *testing.T) {
 	pressAt(0, 2) // pane row 0 -> absolute line 0
 	moveTo(3, 3)
 	moveTo(3, 4) // pane row 2 -> absolute line 2
-	if cmd := release(); cmd != nil {
-		t.Fatalf("release must not schedule anything (the copy is explicit): %v", cmd)
+	if cmd := release(); cmd == nil {
+		t.Fatalf("release must auto-copy the settled pick: %v", cmd)
+	}
+	if !m.sel.copied {
+		t.Fatalf("the auto-copy must mark the pick: %+v", m.sel)
 	}
 	if m.sel.anchorLine != 0 || m.sel.anchorCol != 0 || m.sel.dragLine != 2 || m.sel.dragCol != 3 {
 		t.Fatalf("drag endpoints: %+v", m.sel)
