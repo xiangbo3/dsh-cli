@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"dsh-cli/internal/client"
+	"dsh-cli/internal/config"
 	"dsh-cli/internal/protocol"
 )
 
@@ -250,6 +252,56 @@ func TestConnectLaunch(t *testing.T) {
 	}
 }
 
+// TestConnectLaunchFreshCreds pins the cold-boot credential swap: the
+// shared conn already carries the previous lifetime's token and cookie
+// (a concurrently booting app wired them before the launch settled) and
+// the stored config agrees. When the child's fresh token lands, the conn
+// must hold it (with the dead host's cookie dropped) and the config must
+// lose the stale cookie too — the next boot dials the fresh host with
+// the fresh token, not the stale pair.
+func TestConnectLaunchFreshCreds(t *testing.T) {
+	port := freePort(t)
+	t.Setenv("DSH_BIN", fakeDsh(t, port))
+	t.Setenv("DSH_CLI_HOME", t.TempDir())
+	base := downBase(port)
+
+	// the previous lifetime's credentials: config and the live conn
+	_ = config.Save(config.Config{
+		Token:     "STALE-TOK",
+		Cookie:    "dsh-auth-stale=stale.sig",
+		CookieFor: base,
+	})
+	conn := client.ConnFor(base)
+	conn.SetToken("STALE-TOK")
+	conn.SetCookie("dsh-auth-stale=stale.sig")
+
+	h, tok, err := Connect(base, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "FAKE-TOK-123" {
+		t.Fatalf("token = %q", tok)
+	}
+	if got := client.ConnFor(base); got != conn {
+		t.Fatal("ConnFor returned a different shared entry")
+	}
+	if got := conn.Token(); got != "FAKE-TOK-123" {
+		t.Fatalf("conn token = %q, want the fresh launch token (the stale one is the dead host's)", got)
+	}
+	if got := conn.Cookie(); got != "" {
+		t.Fatalf("conn cookie = %q, want none (the fresh host knows no cookie of the dead one)", got)
+	}
+	cfg := config.Load()
+	if cfg.Token != "FAKE-TOK-123" {
+		t.Fatalf("stored token = %q", cfg.Token)
+	}
+	if cfg.Cookie != "" || cfg.CookieFor != "" {
+		t.Fatalf("stale cookie survived the relaunch: %q for %q", cfg.Cookie, cfg.CookieFor)
+	}
+	h.Stop()
+	StopAll()
+}
+
 // TestConnectLaunchNoToken pins the old-build flow: a launcher that binds
 // without printing a ?token= line settles as a ready host with an empty
 // token (a bare connection works) — instead of waiting out the 90s token
@@ -346,4 +398,73 @@ func TestConnectSlowHost(t *testing.T) {
 	if h, tok, err := Connect(downBase(port), "held", true); h != nil || tok != "held" || err != nil {
 		t.Fatalf("slow host relaunched: (%v, %q, %v)", h, tok, err)
 	}
+}
+
+// lateTokenFake is a gated stand-in whose bind precedes the token line by
+// more than the ready grace: it answers the bare index with the gate 401
+// from the first probe, then prints its ?token= line 4s later (a slow
+// boot between bind and print).
+func lateTokenFake(t *testing.T, port int) string {
+	t.Helper()
+	requirePython(t)
+	code := "import sys, http.server, socketserver, threading, time\n" +
+		"a = sys.argv\n" +
+		"port = int(a[a.index(\"--port\") + 1])\n" +
+		"body = b\"dsh web authentication required\"\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def _send(self, code, extra=None):\n" +
+		"        self.send_response(code)\n" +
+		"        for k, v in (extra or {}).items():\n" +
+		"            self.send_header(k, v)\n" +
+		"        self.send_header(\"Content-Length\", str(len(body)))\n" +
+		"        self.send_header(\"Connection\", \"close\")\n" +
+		"        self.end_headers()\n" +
+		"        self.wfile.write(body)\n" +
+		"    def do_GET(self):\n" +
+		"        if self.path.startswith(\"/?token=\"):\n" +
+		"            self._send(401)\n" +
+		"        else:\n" +
+		"            self._send(401)\n" +
+		"    def log_message(self, *a):\n" +
+		"        pass\n" +
+		"socketserver.ThreadingTCPServer.allow_reuse_address = True\n" +
+		"srv = socketserver.ThreadingTCPServer((\"127.0.0.1\", port), H)\n" +
+		"threading.Thread(target=srv.serve_forever, daemon=True).start()\n" +
+		"time.sleep(4)\n" +
+		"print(\"dsh web: http://127.0.0.1:%d/?token=LATE-TOK-456\" % port, flush=True)\n" +
+		"time.sleep(300)\n"
+	script := "#!/bin/sh\nexec python3 -c '" + code + "' \"$@\"\n"
+	p := filepath.Join(t.TempDir(), "dsh-late.sh")
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestConnectGatedTokenLate pins the boot race: a gated host whose token
+// line lands MORE than the ready grace after the bind must still yield
+// its token — settling token-less would leave the caller holding the
+// stale credentials the new gate rejects (connect fails until a manual
+// --token re-run). A token-less old build must keep settling on the grace
+// (TestConnectLaunchNoToken).
+func TestConnectGatedTokenLate(t *testing.T) {
+	port := freePort(t)
+	t.Setenv("DSH_BIN", lateTokenFake(t, port))
+	t.Setenv("DSH_CLI_HOME", t.TempDir()) // hermetic for SaveToken
+
+	start := time.Now()
+	h, tok, err := Connect(downBase(port), "STALE-TOK", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "LATE-TOK-456" {
+		t.Fatalf("token = %q, want the late-printed launch token (the held STALE-TOK would 401 forever)", tok)
+	}
+	if h.Pid() == 0 {
+		t.Fatal("no pid")
+	}
+	if d := time.Since(start); d > 30*time.Second {
+		t.Fatalf("connect took %s (the late token is at +4s; no full 90s deadline)", d)
+	}
+	StopAll()
 }

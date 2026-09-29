@@ -31,6 +31,9 @@ func historyHost(t *testing.T, n int, calls *int32) *httptest.Server {
 		}}
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok") // the legacy build's bare index
+	})
 	mux.HandleFunc("/api/host.describe", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent) // quiet the background baseline
 	})

@@ -42,17 +42,6 @@ func Truncate(s string, n int, cutter string) string {
 	return s[:cut] + cutter
 }
 
-// Clip is a rune-safe byte clip without a cutter.
-func Clip(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
-}
-
 // TruncateMiddle keeps the first and last parts of s within n bytes total,
 // separated by "…"; rune boundaries on both ends are respected.
 func TruncateMiddle(s string, n int) string {

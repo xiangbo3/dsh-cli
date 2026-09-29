@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -85,9 +86,6 @@ func (h *Host) Base() string { return h.base }
 // killed before this launch (the caller picks the matching hint line).
 func (h *Host) Restarted() bool { return h.restarted }
 
-// LogPath is the child's stdout/stderr log (the data dir).
-func (h *Host) LogPath() string { return h.logPath }
-
 // Current is this dsh-cli's live child (nil when none).
 func Current() *Host {
 	curMu.Lock()
@@ -95,9 +93,8 @@ func Current() *Host {
 	return current
 }
 
-// StopAll kills this dsh-cli's live child (idempotent). Exit no longer
-// calls it — the web persists — but the kill-and-relaunch flow and tests
-// use it.
+// StopAll kills this dsh-cli's live child (idempotent). The relaunch
+// flow stops the host directly, so tests are the only caller.
 func StopAll() {
 	curMu.Lock()
 	h := current
@@ -108,11 +105,15 @@ func StopAll() {
 	}
 }
 
-// SaveToken persists the captured launch token to the config
-// (best-effort: a read-only home must not block the boot).
+// SaveToken persists the captured launch token to the config and drops
+// the stored exchange cookie (the fresh host process knows no cookie of
+// the dead one; a kept cookie would cost the next boot a rejected dial).
+// Best-effort: a read-only home must not block the boot.
 func SaveToken(tok string) {
 	c := config.Load()
 	c.Token = tok
+	c.Cookie = ""
+	c.CookieFor = ""
 	_ = config.Save(c)
 }
 
@@ -256,6 +257,27 @@ func launch(base string, restarted bool) (*Host, string, error) {
 		case tok = <-h.token:
 			tokSeen = true
 		case <-time.After(tokenGrace):
+			// The grace ran out with no token: an un-gated old build
+			// owes none (a bare connection works) and settles here;
+			// a GATED build still owes its launch token — without it
+			// the held (stale) credentials 401 forever — so it waits
+			// its own deadline instead of returning a host the gate
+			// will reject.
+			if gatedIndex(base) {
+				select {
+				case tok = <-h.token:
+					tokSeen = true
+				case <-h.done:
+					h.Stop()
+					if up(base) {
+						return nil, "", nil // a sibling took the port after our child exited
+					}
+					return nil, "", fmt.Errorf("dsh web exited during boot: %s", h.tail())
+				case <-time.After(tokenDeadline):
+					h.Stop()
+					return nil, "", fmt.Errorf("dsh web printed no launch token within %s: %s", tokenDeadline, h.tail())
+				}
+			}
 		case <-h.done:
 			h.Stop()
 			if up(base) {
@@ -280,6 +302,14 @@ func launch(base string, restarted bool) (*Host, string, error) {
 	}
 	if tokSeen {
 		SaveToken(tok)
+		// The child is a fresh process: the token the shared conn still
+		// holds (stored or pre-checked) is its dead predecessor's.
+		// Install the fresh token and drop the dead cookie at once, so a
+		// client that is already dialing stops burning the stale pair
+		// without waiting for its first 401.
+		conn := client.ConnFor(base)
+		conn.SetToken(tok)
+		conn.SetCookie("")
 	}
 	curMu.Lock()
 	current = h
@@ -365,6 +395,33 @@ func (h *Host) emit(tok string) {
 
 func isTokByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '+'
+}
+
+// gatedIndex reports whether base owes a launch token: the cookie-gate
+// 401 (a gated build past its boot window) or a 404 (the same build
+// inside the window — its web server listens before its routes are
+// claimed, so the gate and the token are still coming). Any other
+// answer — an un-gated old build's 200, a transport blip — reports
+// false and settles the launch token-less.
+func gatedIndex(base string) bool {
+	hc := &http.Client{Timeout: probeTimeout}
+	req, err := http.NewRequest(http.MethodGet, base+"/", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return true // boot window: the token line is still coming
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+	return strings.Contains(string(body), client.GateMarker)
 }
 
 // waitReady polls the index until any HTTP response (a gated build

@@ -92,6 +92,14 @@ func (fh *fakeHost) handle(w http.ResponseWriter, r *http.Request) {
 	fh.mu.Lock()
 	fh.calls = append(fh.calls, path)
 	fh.mu.Unlock()
+	if path == "respond" {
+		// The legacy answer channel acks with a bare receipt (accepted
+		// + reason), not a server-response envelope: the client refuses
+		// to settle a modal on an unrecognized ack.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accepted":true}`))
+		return
+	}
 	time.Sleep(fakeLatency)
 	value, _ := json.Marshal(fh.unary(path, env.Payload))
 	w.Header().Set("Content-Type", "application/json")

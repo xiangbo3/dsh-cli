@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.0.51
+
+### Added
+
+- Hermetic functional test suite (`make test-func`, included in
+  `make check`): the built binary runs against a private fake dsh web,
+  covering status/ls/new/history/models/workspaces, one-shot (arg and
+  pipe), and the error paths.
+
+### Fixed
+
+- Cold auto-start no longer dials the freshly launched dsh web with the
+  stored (stale) token: the launched host's own launch token is installed
+  on the live connection as soon as it is captured, and the dead host's
+  stored cookie is dropped.
+- Auto-start no longer sticks in "connecting": the fresh dsh web answers
+  404 briefly after its port opens (its routes are claimed later), and a
+  probe inside that window locked the client onto the legacy wire for the
+  whole session — the fresh token was captured but never used. The 404
+  boot window now keeps the protocol undecided until the host settles,
+  and a launch that meets the window waits for the late token instead of
+  settling token-less.
+- Question / approval confirmation: the "press ctrl+i to open" hint no
+  longer stays lit after the answer — the pending frame settles as soon
+  as the host accepts it.
+- The top status bar no longer disappears when the multi-line input is
+  taller than the window: the input keeps only what fits and the bar
+  stays on line one.
+- A mid-turn re-baseline no longer loses the turn's final summary when
+  the history page's tail lags the live events.
+- The question popup's answers reach the agent again on the upgraded
+  host: the answer batch still rode the legacy envelope, so the host's
+  ask_user_question read an empty answers slot.
+
+### 新增
+
+- 无外部依赖的功能测试套件（`make test-func`，已并入 `make check`）：
+  用私有的假 dsh web 驱动构建出的二进制，覆盖
+  status/ls/new/history/models/workspaces、一次性命令（参数与管道）
+  及各错误路径。
+
+### 修复
+
+- 冷启动自动拉起 dsh web 后，不再拿已存的旧 token 去连接新进程：新 token
+  捕获到的第一时间写入当前连接，并清掉上一代进程的旧 cookie。
+- 自动拉起后不再卡在"连接中"：新宿主端口开放后有一小段时间回 404（路由
+  稍后才注册），此前的探测会把协议代际永久钉在旧版线上——新 token 捕获
+  了却从未用上。现在 404 启动窗口内保持协议待定、等宿主就绪后再判定；
+  看到窗口的启动流程会等待迟到的 token，而不是空 token 收尾。
+- 提问 / 审批确认窗口：回答后不再残留“按 ctrl+i 打开”的提示——宿主接受
+  回答时待答帧立即清除。
+- 多行输入高于窗口时，顶部状态栏不再消失：输入只显示放得下的行，状态栏
+  保持在第一行。
+- 回合中途重新基线化时，若历史页尾部落后于实时事件，不再丢失回合的
+  最后总结。
+- /permission 命令（及 ctrl+p 预设切换）在升级后的宿主上恢复工作：
+  执行请求的附件参数名写错，网关拒绝了每次调用。
+- 升级后的宿主上，提问弹窗的回答重新送达 agent：回答批次此前仍携带
+  旧版信封，宿主的 ask_user_question 读不到答案。
+
 ## 1.0.50
 
 ### Fixed

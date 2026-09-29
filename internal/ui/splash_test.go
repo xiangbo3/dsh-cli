@@ -215,3 +215,9 @@ func TestSplashPreloadTranscript(t *testing.T) {
 		t.Fatalf("first frame after the splash must show the pre-loaded transcript:\n%s", plain)
 	}
 }
+
+// splashTaglineSpaced is the English tagline in upper case with double
+// inter-word spaces (test-only: pins what the splash renders).
+func splashTaglineSpaced() string {
+	return strings.ToUpper(strings.ReplaceAll(splashTagline, " ", "  "))
+}

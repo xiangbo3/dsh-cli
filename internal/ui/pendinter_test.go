@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"dsh-cli/internal/app"
+	"dsh-cli/internal/core"
 	"dsh-cli/internal/protocol"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -202,5 +203,114 @@ func TestApprovalNonShellSingleKey(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	if got := len(m.mods); got != 0 {
 		t.Fatalf("after ctrl+a: modals = %d (want 0, answered on the first key)", got)
+	}
+}
+
+// drainNotices returns the notices queued so far. The tests drive the
+// model without Init, so nothing consumes the store's notice channel.
+func drainNotices(st *core.Store) []core.Notice {
+	var out []core.Notice
+	for {
+		select {
+		case n := <-st.Notices():
+			out = append(out, n)
+		default:
+			return out
+		}
+	}
+}
+
+// TestQuestionAnsweredClearsPending pins the local settle of a parked
+// batch: answering through the modal must clear the pending frame on the
+// host's ack (the new dialect never sends the resolved frame, so without
+// the settle the ctrl+i strip stays lit), and a resolved frame that still
+// lands (the legacy dialect) is a no-op — one toast, not two.
+func TestQuestionAnsweredClearsPending(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	a := app.New(newFakeHost(t).URL)
+	a.Start(ctx)
+	m := NewModel(a)
+	m.W, m.H = 120, 40
+
+	st := a.Store()
+	st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp"}})
+	st.SetActive("s1")
+	st.QuestionRequested("s1", "rpc-1", []protocol.QuestionItem{{
+		Id:       "q1",
+		Question: "Pick one?",
+		Options:  []protocol.QuestionOption{{Label: "A"}, {Label: "B"}},
+	}})
+	drainNotices(st)
+
+	m.Update(dirtyMsg{})
+	if m.topModal() == nil {
+		t.Fatal("the parked batch did not auto-open")
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.mods) != 0 {
+		t.Fatalf("after enter: modals = %d (want 0)", len(m.mods))
+	}
+	if cmd == nil {
+		t.Fatal("enter did not return the answer command")
+	}
+	cmd()
+	snap := st.Get("s1")
+	if len(snap.Questions) != 0 {
+		t.Fatalf("after the ack: pending questions = %d (want 0: the ctrl+i strip stays lit)", len(snap.Questions))
+	}
+	notices := drainNotices(st)
+	if len(notices) != 1 {
+		t.Fatalf("notices = %v (want exactly one settle toast)", notices)
+	}
+	// A resolved frame that still lands finds an empty slot: no second toast.
+	st.QuestionResolved("rpc-1", "answered")
+	if got := len(drainNotices(st)); got != 0 {
+		t.Fatalf("late resolved frame toasted again: %d notices", got)
+	}
+}
+
+// TestApprovalAnsweredClearsPending pins the approval twin: the allow
+// chord settles the parked frame on the ack, and the decided side that
+// follows (the session-log approval/decided) is a no-op.
+func TestApprovalAnsweredClearsPending(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	a := app.New(newFakeHost(t).URL)
+	a.Start(ctx)
+	m := NewModel(a)
+	m.W, m.H = 120, 40
+
+	st := a.Store()
+	st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp"}})
+	st.SetActive("s1")
+	st.ApprovalRequested("s1", "rpc-1", "app-1", "read", "call-1", "needs read access", `{"file_path":"/tmp/x"}`)
+	drainNotices(st)
+
+	m.Update(dirtyMsg{})
+	if m.topModal() == nil {
+		t.Fatal("the parked approval did not auto-open")
+	}
+	// "read" is not bash-family: the first allow key answers.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	if len(m.mods) != 0 {
+		t.Fatalf("after ctrl+a: modals = %d (want 0)", len(m.mods))
+	}
+	if cmd == nil {
+		t.Fatal("allow did not return the response command")
+	}
+	cmd()
+	snap := st.Get("s1")
+	if len(snap.Approvals) != 0 {
+		t.Fatalf("after the ack: pending approvals = %d (want 0)", len(snap.Approvals))
+	}
+	notices := drainNotices(st)
+	if len(notices) != 1 {
+		t.Fatalf("notices = %v (want exactly one settle toast)", notices)
+	}
+	// The decided frame that follows finds an empty slot: no second toast.
+	st.ApprovalResolved("app-1", "allowed-once")
+	if got := len(drainNotices(st)); got != 0 {
+		t.Fatalf("late decided frame toasted again: %d notices", got)
 	}
 }

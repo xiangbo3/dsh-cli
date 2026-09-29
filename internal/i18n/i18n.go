@@ -365,21 +365,6 @@ func LoadDefault() *Locale {
 	return English()
 }
 
-// DetectAndLoad keeps the pre-preference boot contract for callers that
-// only care about the environment: the environment's language when a
-// catalog loads for it, the built-in English otherwise.
-func DetectAndLoad() *Locale {
-	c := Detect()
-	if c == "" {
-		return English()
-	}
-	l, _, err := Load(c)
-	if err != nil {
-		return English()
-	}
-	return l
-}
-
 // Available lists the catalog codes on disk plus the built-in "en" /
 // "zh" (both faces exist without any file), sorted — the /language
 // listing.

@@ -512,25 +512,33 @@ func (s *Store) SummaryFor(id string) *protocol.SessionSummary {
 	return &cp
 }
 
-// LoadTail rebuilds the transcript from a history tail page and seeds the
-// projection baseline. This is the re-baseline primitive after (re)connect.
+// LoadTail rebuilds the transcript from a history tail page and seeds
+// the projection baseline. This is the re-baseline primitive after
+// (re)connect.
 //
-// A page describes the log at its own cut. When live frames have already
-// advanced past that cut (a slow response landing late, e.g. the boot
-// double-load), the transcript keeps the fresh items and the projection
-// watermarks keep their newer live values — higher-seq-wins, the same rule
-// the wire contract uses for baselines.
+// The rebuild gate is the page's own event coverage, not the projection
+// cut: the baseline may sample ahead of the page's last event (a tail
+// sample taken after the page snapshot), and a rebuild gated on it would
+// drop events already applied live — which the follow stream's snapshot
+// cursor marks as seen, so they never redeliver (a turn's final message
+// vanishing on a mid-turn re-baseline). A page at or behind a live fold
+// keeps the fold (higher-seq-wins, the same rule the wire contract uses
+// for baselines); a fresh fold takes the page either way (history beats
+// a blank board).
 func (s *Store) LoadTail(id string, resp *protocol.HistoryResponse) {
 	s.mu.Lock()
 	st := s.Sess(id)
-	cut := int64(0)
-	if resp.Projections != nil {
+	n := len(resp.Events)
+	last := int64(0)
+	if n > 0 {
+		last = resp.Events[n-1].Event.Seq
+	}
+	cut := last
+	if resp.Projections != nil && resp.Projections.AsOfSeq > cut {
 		cut = resp.Projections.AsOfSeq
 	}
-	if n := len(resp.Events); n > 0 && resp.Events[n-1].Event.Seq > cut {
-		cut = resp.Events[n-1].Event.Seq
-	}
-	if cut >= st.T.MaxSeq() {
+	fresh := st.T.MaxSeq() == 0 || len(st.T.Items) == 0
+	if fresh || last >= st.T.MaxSeq() {
 		st.T = NewTranscript()
 		for _, entry := range resp.Events {
 			st.T.Apply(&entry.Event)

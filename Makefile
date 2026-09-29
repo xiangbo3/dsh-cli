@@ -23,7 +23,7 @@ export GOCACHE
 .gocache:
 	mkdir -p $@
 
-.PHONY: all deps build release release-clean test test-race vet lint check run clean install
+.PHONY: all deps build release release-clean test test-race test-func smoke vet lint check run clean install
 
 all: build
 
@@ -94,6 +94,18 @@ test: .gotmp .gocache
 test-race: .gotmp .gocache
 	go test -race ./...
 
+# test-func: hermetic end-to-end suite (functional/): drives the built
+# binary against a private fake dsh web — every command surface (status,
+# ls, new, history, models, workspaces, one-shot via arg/pipe,
+# flags-after-prompt, locale seeding, error paths). Builds first so the
+# suite always runs the current source; FUNC_BIN pins the binary.
+test-func: .gotmp .gocache build
+	FUNC_BIN=$(CURDIR)/$(BINARY) go test -count=1 ./functional/...
+
+# smoke: live end-to-end against a running dsh web (http://127.0.0.1:3080).
+smoke: build
+	./smoke.sh
+
 vet: .gotmp .gocache
 	go vet ./...
 
@@ -103,7 +115,7 @@ vet: .gotmp .gocache
 lint: .gotmp .gocache
 	golangci-lint run ./...
 
-check: vet test-race build
+check: vet test-race build test-func
 
 run: .gotmp .gocache
 	go run -buildvcs=false .

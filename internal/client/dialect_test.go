@@ -198,6 +198,11 @@ func (f *fakeNewHost) unary(w http.ResponseWriter, env protocol.Envelope, r *htt
 		value = map[string]any{"ok": true}
 	case "agentPresets/select":
 		value = "minimal"
+	case "commands/execute":
+		value = map[string]any{
+			"commandId": "cmd-1",
+			"result":    map[string]any{"kind": "success", "text": "preset workspace-write"},
+		}
 	default:
 		value = map[string]any{}
 	}
@@ -247,6 +252,40 @@ func TestDialectDetect(t *testing.T) {
 	ld, _ := ConnFor(legacy.URL).Detect(context.Background(), legacy.Client())
 	if ld != DialectOld {
 		t.Fatalf("legacy dialect = %v, want DialectOld", ld)
+	}
+}
+
+// TestDetectBootWindow pins the gated build's boot window: the web
+// server listens before its routes are claimed and answers the bare
+// index with 404, only the later probe hits the gate. A probe inside
+// the window must leave the dialect UNDECIDED (an error for the caller's
+// backoff) — pinning the legacy generation off the 404 strands the boot
+// on the old wire, because the first detector wins and is never reset.
+func TestDetectBootWindow(t *testing.T) {
+	window := make(chan struct{}) // open: the 404 window; closed: the gate is up
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-window:
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, "dsh web authentication required")
+	}))
+	defer srv.Close()
+	conn := ConnFor(srv.URL)
+
+	if d, err := conn.Detect(context.Background(), srv.Client()); err == nil || d != 0 {
+		t.Fatalf("window probe = (%v, %v), want undecided (0, err)", d, err)
+	}
+	close(window)
+	d, err := conn.Detect(context.Background(), srv.Client())
+	if err != nil {
+		t.Fatalf("settled probe: %v", err)
+	}
+	if d != DialectNew {
+		t.Fatalf("dialect = %v, want DialectNew once the gate settles", d)
 	}
 }
 
@@ -362,5 +401,38 @@ func TestRespondNewDialect(t *testing.T) {
 		!strings.Contains(log, `"eventId":"evt-9"`) ||
 		!strings.Contains(log, "allowed-once") {
 		t.Fatalf("$events/result = %q, want clientId+eventId+outcome", log)
+	}
+}
+
+// TestRespondNewQuestion pins the question answer channel against the
+// modal's pointer payload: the new host's tool reads result.answers
+// directly, so the legacy envelope (sessionId + answer slot) must not
+// ride the $events/result value — only the unwrapped answer list.
+func TestRespondNewQuestion(t *testing.T) {
+	f := newFakeNewHost(t, "tok")
+	c := New(f.URL)
+	c.conn.SetToken("tok")
+	if err := c.conn.Exchange(context.Background(), c.http); err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	c.conn.SetHostFacts("cli-1", "/tmp")
+	ans := &protocol.QuestionAnswer{SessionId: "s1"}
+	ans.Answer.Answers = []protocol.QuestionAnswerItem{
+		{Id: "q1", Selected: []string{"选项 A"}},
+		{Id: "q2", Selected: []string{}, Custom: "自己填的"},
+	}
+	if err := c.Respond(context.Background(), "evt-q", ans); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	f.mu.Lock()
+	log := strings.Join(f.argLog, " | ")
+	f.mu.Unlock()
+	if !strings.Contains(log, `"clientId":"cli-1"`) ||
+		!strings.Contains(log, `"eventId":"evt-q"`) ||
+		!strings.Contains(log, `"answers":[{"id":"q1","selected":["选项 A"]},{"id":"q2","selected":[],"custom":"自己填的"}]`) {
+		t.Fatalf("$events/result = %q, want the unwrapped answer list", log)
+	}
+	if strings.Contains(log, `"answer":{"answers"`) || strings.Contains(log, `"sessionId":"s1"`) {
+		t.Fatalf("$events/result = %q, legacy envelope must not ride the new channel", log)
 	}
 }

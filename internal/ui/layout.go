@@ -50,10 +50,12 @@ func (m *Model) View() string {
 		m.inpY = -1   // ... and no input bar to pick in either
 		return fillRows(m.splashView(), m.W)
 	}
-	// A 5-row window cannot hold the full deck (top bar, two hairlines,
-	// input line, status strip, plus at least one transcript row), so it
-	// falls into the mini layout too.
-	if m.W <= 12 || m.H < 6 {
+	// The full deck needs at least eight rows (top bar, two hairlines,
+	// the framed input's two border rows, the status strip, plus one
+	// transcript row): below that the frame cannot fit and the
+	// alt-screen renderer would clip the top bar, so the mini layout
+	// takes over.
+	if m.W <= 12 || m.H < 8 {
 		m.transX = -1 // mini layout keeps only the top bar: no pane
 		m.inpY = -1
 		return fillRows(m.miniView(), m.W)
@@ -65,7 +67,15 @@ func (m *Model) View() string {
 	if menuLines == nil {
 		menuLines = m.atMenuView(m.W)
 	}
-	inputLines := m.frameInput(m.W, m.inp.render(m, m.W-2))
+	// The input deck must fit the window: a multi-line bar taller than
+	// the frame would overrun it, and the alt-screen renderer clips
+	// overflow from the top — eating the persistent top bar. Keep the
+	// tail (the caret's rows) when it does not fit.
+	inRows := m.inp.render(m, m.W-2)
+	if maxRows := m.H - 7; len(inRows) > maxRows {
+		inRows = inRows[len(inRows)-maxRows:]
+	}
+	inputLines := m.frameInput(m.W, inRows)
 	queue := m.queueStrip(m.W)
 	status := m.statusBar(m.W)
 	toasts := m.toastsView(m.W)

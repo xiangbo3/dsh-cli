@@ -61,14 +61,14 @@ func (c *Client) History(ctx context.Context, sessionId string, beforeSeq int64,
 func (c *Client) CommandExecute(ctx context.Context, sessionId, line string) (res *protocol.CommandExecResult, matched bool, err error) {
 	payload := struct {
 		Args struct {
-			AgentId string `json:"agentId"`
-			Line    string `json:"line"`
-			Images  []any  `json:"images"`
+			AgentId              string `json:"agentId"`
+			Line                 string `json:"line"`
+			SubmittedAttachments []any  `json:"submittedAttachments"`
 		} `json:"args"`
 	}{}
 	payload.Args.AgentId = sessionId
 	payload.Args.Line = line
-	payload.Args.Images = []any{}
+	payload.Args.SubmittedAttachments = []any{}
 	var v *protocol.CommandExecResult
 	if err := c.call(ctx, "commands/execute", payload, &v); err != nil {
 		return nil, false, err

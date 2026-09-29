@@ -563,20 +563,6 @@ func (in *inputLine) caretVert(m *Model, dir int) bool {
 	return true
 }
 
-// selSetAll picks everything (the caret is parked at the end when the
-// pick would come out empty).
-func (in *inputLine) selSetAll() {
-	if len(in.val) == 0 {
-		in.sel.reset()
-		return
-	}
-	if in.cur == 0 {
-		in.cur = len(in.val)
-	}
-	in.sel.anchor = 0
-	in.sel.on = true
-}
-
 // mousePress places the caret at idx (a plain click: no pick).
 func (in *inputLine) mousePress(idx int) {
 	if idx > len(in.val) {
@@ -1219,20 +1205,6 @@ func (e *lineEdit) selRight() {
 func (e *lineEdit) selHome() { e.selMove(0) }
 func (e *lineEdit) selEnd()  { e.selMove(len(e.val)) }
 
-// selSetAll picks everything (the caret is parked at the end when the
-// pick would come out empty).
-func (e *lineEdit) selSetAll() {
-	if len(e.val) == 0 {
-		e.sel.reset()
-		return
-	}
-	if e.cur == 0 {
-		e.cur = len(e.val)
-	}
-	e.sel.anchor = 0
-	e.sel.on = true
-}
-
 // mousePress places the caret at idx (a plain click: no pick).
 func (e *lineEdit) mousePress(idx int) {
 	e.sel.anchor = idx
@@ -1251,6 +1223,20 @@ func (e *lineEdit) mouseRelease() {
 	if e.sel.anchor == e.cur {
 		e.sel.on = false
 	}
+}
+
+// selSetAll picks everything (the caret is parked at the end when the
+// pick would come out empty).
+func (e *lineEdit) selSetAll() {
+	if len(e.val) == 0 {
+		e.sel.reset()
+		return
+	}
+	if e.cur == 0 {
+		e.cur = len(e.val)
+	}
+	e.sel.anchor = 0
+	e.sel.on = true
 }
 
 // mouseSelectLine picks the whole field (the double-click gesture; the

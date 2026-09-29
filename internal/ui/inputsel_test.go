@@ -406,3 +406,16 @@ func TestOSC52Payload(t *testing.T) {
 		t.Fatalf("payload %q want %q", payload, want)
 	}
 }
+
+// selSetAll picks everything (test-only: no production key binds it).
+func (in *inputLine) selSetAll() {
+	if len(in.val) == 0 {
+		in.sel.reset()
+		return
+	}
+	if in.cur == 0 {
+		in.cur = len(in.val)
+	}
+	in.sel.anchor = 0
+	in.sel.on = true
+}

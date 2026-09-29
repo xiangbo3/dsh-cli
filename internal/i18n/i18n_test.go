@@ -184,38 +184,14 @@ func TestAvailable(t *testing.T) {
 	}
 }
 
-func TestDetectAndLoadBootPath(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("DSH_LOCALES", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("DSH_CLI_HOME", t.TempDir()) // no config preference in this test
-	if err := os.WriteFile(filepath.Join(dir, "zh.json"), []byte(`{"top.idle":"· 空闲"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("LC_ALL", "")
-	t.Setenv("LC_MESSAGES", "")
-	t.Setenv("LANG", "zh_CN.UTF-8")
-	l := DetectAndLoad()
-	if l.Lang != "zh" || l.T("top.idle") != "· 空闲" {
-		t.Errorf("DetectAndLoad = %v %q", l.Lang, l.T("top.idle"))
-	}
-	// A zh locale whose catalog file is missing degrades to the
-	// built-in Chinese face (like English, it carries a built-in table).
-	t.Setenv("DSH_LOCALES", filepath.Join(dir, "empty"))
-	if l := DetectAndLoad(); l.Lang != "zh" {
-		t.Errorf("DetectAndLoad without catalog = %v, want zh (built-in face)", l.Lang)
-	} else if got := l.T("top.idle"); got != "· 空闲" {
-		t.Errorf("built-in zh face top.idle = %q", got)
-	}
-}
-
 // TestLoadDefaultPrecedence pins the startup language ladder: the stored
 // preference (config.json "language") beats the locale environment; a
 // preference that does not load (unknown code, malformed file) degrades
 // to the environment; no preference and no environment: built-in English.
 func TestLoadDefaultPrecedence(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("DSH_LOCALES", t.TempDir())
+	loc := t.TempDir()
+	t.Setenv("DSH_LOCALES", loc)
 	cfg := t.TempDir()
 	t.Setenv("DSH_CLI_HOME", cfg)
 	t.Setenv("LC_ALL", "")
@@ -228,9 +204,17 @@ func TestLoadDefaultPrecedence(t *testing.T) {
 		}
 	}
 
-	// No config file: the locale environment decides.
+	// No config file: the locale environment decides — a missing zh
+	// catalog degrades to the built-in Chinese face.
 	if l := LoadDefault(); l.Lang != "zh" {
 		t.Fatalf("no config: LoadDefault = %v, want zh (environment)", l.Lang)
+	}
+	// A user-edited catalog on a search dir serves its translations.
+	if err := os.WriteFile(filepath.Join(loc, "zh.json"), []byte(`{"top.idle":"· 空闲"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadDefault().T("top.idle"); got != "· 空闲" {
+		t.Fatalf("user catalog: top.idle = %q, want the edited value", got)
 	}
 	// A stored preference beats the environment.
 	writeCfg(`{"language": "en"}`)

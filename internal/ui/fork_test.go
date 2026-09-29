@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -145,6 +146,8 @@ func newForkTestServer(t *testing.T) *forkTestServer {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/":
+			io.WriteString(w, "ok") // the legacy build's bare index
 		case "/api/session.fork":
 			var p struct {
 				SessionId string `json:"sessionId"`

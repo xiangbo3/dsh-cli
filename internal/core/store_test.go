@@ -567,3 +567,106 @@ func TestANSISanitizeAtBoundary(t *testing.T) {
 		t.Fatalf("questions = %+v", snap.Questions)
 	}
 }
+
+// TestLoadTailAheadProjectionKeepsLiveFold is the field bug: a re-baseline
+// page whose projection baseline sampled ahead of the page's last event
+// (the tail sample is taken after the page snapshot) used to gate the
+// rebuild on the inflated cut and drop the live-applied final message —
+// the follow stream's snapshot cursor had already marked its seq seen, so
+// it never redelivered. The gate is the page's event coverage; a live fold
+// out-runs the page and keeps its items.
+func TestLoadTailAheadProjectionKeepsLiveFold(t *testing.T) {
+	s := NewStore("http://x")
+	now := time.Now().UnixMilli()
+
+	var live []*protocol.SessionEvent
+	add := func(seq int64, typ, data string) *protocol.SessionEvent {
+		ev := &protocol.SessionEvent{Type: typ, Seq: seq, Time: now + seq, Data: []byte(data)}
+		live = append(live, ev)
+		return ev
+	}
+	add(1, "turn/start", `{"turn":1}`)
+	add(2, "user/message", `{"role":"user","content":[{"type":"text","text":"go"}]}`)
+	for seq := int64(3); seq <= 99; seq++ {
+		add(seq, "assistant/chunk", `{"turn":1,"step":1,"chunk":{"type":"text-delta","text":"x"}}`)
+	}
+	final := add(100, "assistant/message", `{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"final result summary"}]}}`)
+	add(101, "turn/end", `{"turn":1,"reason":{"kind":"completed"}}`)
+
+	s.Sess("s1")
+	s.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Running: true, Cwd: "/w"}})
+	for _, ev := range live {
+		s.Event("s1", ev)
+	}
+	if hasFinal(s.Get("s1"), "final result summary") != 1 {
+		t.Fatal("final message missing before the re-baseline")
+	}
+
+	// The page snapshot predates the canonical commit: its events stop at
+	// seq 99, but the projection baseline is sampled ahead at 101.
+	page := &protocol.HistoryResponse{HasMore: true, Projections: &protocol.ProjectionsBlock{AsOfSeq: 101}}
+	for _, ev := range live[:99] {
+		c := *ev
+		page.Events = append(page.Events, protocol.HistoryEntry{Event: c})
+	}
+	s.LoadTail("s1", page)
+
+	snap := s.Get("s1")
+	if got := hasFinal(snap, "final result summary"); got != 1 {
+		t.Fatalf("after the re-baseline: final message count = %d (want 1: the turn ends, the summary never shows)", got)
+	}
+	if len(snap.Items) == 0 || snap.Items[len(snap.Items)-1].Kind != KindTurnEnd {
+		t.Fatal("turn-end marker lost by the re-baseline")
+	}
+	// A duplicate page at or below the fold's watermark stays a no-op.
+	s.LoadTail("s1", page)
+	if got := hasFinal(s.Get("s1"), "final result summary"); got != 1 {
+		t.Fatalf("second re-baseline: final message count = %d (want 1)", got)
+	}
+	_ = final
+}
+
+// TestLoadTailFreshFoldTakesStalePage pins the other gate side: a fold
+// with nothing applied yet takes the page even when it lags the snapshot
+// cursor (history beats a blank board).
+func TestLoadTailFreshFoldTakesStalePage(t *testing.T) {
+	s := NewStore("http://x")
+	now := time.Now().UnixMilli()
+	s.Sess("s1")
+	page := &protocol.HistoryResponse{HasMore: false}
+	for seq := int64(1); seq <= 5; seq++ {
+		page.Events = append(page.Events, protocol.HistoryEntry{Event: protocol.SessionEvent{
+			Type: "user/message", Seq: seq, Time: now + seq,
+			Data: []byte(fmt.Sprintf(`{"role":"user","content":[{"type":"text","text":"m%d"}]}`, seq)),
+		}})
+	}
+	s.Subscribed("s1", 50) // the snapshot cursor runs ahead of the page
+	s.LoadTail("s1", page)
+	if got := len(s.Get("s1").Items); got != 5 {
+		t.Fatalf("fresh fold after a stale page: items = %d (want 5: history beats a blank board)", got)
+	}
+	// Live events above the cursor still apply (the watermark is the page's).
+	s.Event("s1", &protocol.SessionEvent{
+		Type: "user/message", Seq: 51, Time: now + 51,
+		Data: []byte(`{"role":"user","content":[{"type":"text","text":"live"}]}`),
+	})
+	if got := len(s.Get("s1").Items); got != 6 {
+		t.Fatalf("live event above the cursor: items = %d (want 6)", got)
+	}
+}
+
+// hasFinal counts transcript items carrying the exact text.
+func hasFinal(snap *Snapshot, text string) int {
+	n := 0
+	for _, it := range snap.Items {
+		if it.Kind != KindAssistant {
+			continue
+		}
+		for _, b := range it.Blocks {
+			if b.Text == text {
+				n++
+			}
+		}
+	}
+	return n
+}

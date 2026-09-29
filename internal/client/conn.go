@@ -133,19 +133,23 @@ func (c *Conn) Dialect() Dialect {
 	return c.dial
 }
 
-// newGateMarker is the index 401 body the cookie-gated build answers
+// GateMarker is the index 401 body the cookie-gated build answers
 // with. A legacy host that gates on the DSH_TOKEN bearer also 401s the
 // bare index but never carries it — such a host keeps the legacy wire
 // (the DSH_TOKEN env supplies its bearer), so a 401 without the marker
 // classifies as the old build.
-const newGateMarker = "dsh web authentication required"
+const GateMarker = "dsh web authentication required"
 
 // Detect pins the dialect from one unauthenticated probe: a 200 index
 // is the legacy build; a 401 index is the cookie-gated build when its
 // body carries the gate marker (a bearer-gated legacy host 401s the
-// same probe without it). Transport failure leaves the dialect
-// undecided (the caller retries on its normal backoff) and reports the
-// error.
+// same probe without it). A 404 index is the gated build's boot
+// window — its web server listens before its routes are claimed and
+// answers 404 — which is not classifiable yet: the dialect stays
+// undecided and the error makes the caller retry on its backoff.
+// Pinning the generation off that window (first detector wins, never
+// reset) would strand the whole boot on the legacy wire. Transport
+// failure leaves the dialect undecided the same way.
 func (c *Conn) Detect(ctx context.Context, hc *http.Client) (Dialect, error) {
 	c.mu.Lock()
 	if c.dial != 0 {
@@ -166,10 +170,17 @@ func (c *Conn) Detect(ctx context.Context, hc *http.Client) (Dialect, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
 
+	if resp.StatusCode == http.StatusNotFound {
+		// Boot window: the gated build listens before claiming its
+		// routes. Pinning DialectOld off the 404 would strand the boot
+		// on the legacy wire (first detector wins, never reset).
+		return 0, fmt.Errorf("detect: index answered %d before settling", resp.StatusCode)
+	}
+
 	c.mu.Lock()
 	if c.dial == 0 { // first detector wins
 		if resp.StatusCode == http.StatusUnauthorized {
-			if strings.Contains(string(body), newGateMarker) {
+			if strings.Contains(string(body), GateMarker) {
 				c.dial = DialectNew
 			} else {
 				c.dial = DialectOld // a bearer-gated legacy host

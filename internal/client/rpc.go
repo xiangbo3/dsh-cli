@@ -513,7 +513,9 @@ func (c *Client) respondOld(ctx context.Context, rpcId string, value any) error 
 
 // respondNew maps the old answer payloads onto the $events result
 // channel: an approval outcome string or the question answer list, under
-// outcome.kind "result".
+// outcome.kind "result". Callers hand the payloads as values or pointers;
+// both map the same way — the host tool reads result.answers directly,
+// so an un-unwrapped legacy envelope leaves it undefined there.
 func (c *Client) respondNew(ctx context.Context, rpcId string, value any) error {
 	clientID := c.conn.ClientID()
 	if clientID == "" {
@@ -523,7 +525,11 @@ func (c *Client) respondNew(ctx context.Context, rpcId string, value any) error 
 	switch v := value.(type) {
 	case protocol.ApprovalResponse:
 		outcome = v.Outcome // allowed-once | rejected
+	case *protocol.ApprovalResponse:
+		outcome = v.Outcome
 	case protocol.QuestionAnswer:
+		outcome = map[string]any{"answers": v.Answer.Answers}
+	case *protocol.QuestionAnswer:
 		outcome = map[string]any{"answers": v.Answer.Answers}
 	default:
 		outcome = value

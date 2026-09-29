@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,6 +146,8 @@ func newModeTestServer(t *testing.T) *modeTestServer {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/":
+			io.WriteString(w, "ok") // the legacy build's bare index
 		case "/api/agentPreset.list":
 			fmt.Fprint(w, `{"type":"server-response","result":{"ok":true,"value":{`+
 				`"presets":[`+

@@ -55,7 +55,8 @@ type App struct {
 	ctx context.Context
 }
 
-// New builds an App for base (e.g. "http://127.0.0.1:3080").
+// New builds an App for base (e.g. "http://127.0.0.1:3080"); the launch
+// token comes from config.
 func New(base string) *App {
 	return NewWith(base, "")
 }

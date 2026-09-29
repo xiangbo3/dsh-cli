@@ -210,13 +210,6 @@ func easeOutCubic(x float64) float64 {
 	return 1 - q*q*q
 }
 
-// splashTaglineSpaced is the English tagline set in upper case with a
-// double inter-word space: a wide, quiet baseline under the wordmark
-// (the boot splash's tests pin against it).
-func splashTaglineSpaced() string {
-	return strings.ToUpper(strings.ReplaceAll(splashTagline, " ", "  "))
-}
-
 // splashTagline renders the tagline in the active language, the same
 // upper-case double-spaced treatment (a no-op for non-alphabetic text).
 func (m *Model) splashTagline() string {

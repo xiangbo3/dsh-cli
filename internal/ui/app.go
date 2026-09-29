@@ -3091,10 +3091,10 @@ func (m *Model) flashTurnEnds() {
 // each rpcId at most once; manual mode (ctrl+i) reopens frames the user
 // esc-closed. It never stacks on an already-open modal.
 func (m *Model) surfacePending(auto bool) bool {
+	id := m.activeID()
 	if len(m.mods) > 0 {
 		return false
 	}
-	id := m.activeID()
 	if id == "" {
 		return false
 	}
@@ -3323,9 +3323,17 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 		m.closeModal()
 		pen := mod.pen
 		return m.runCmd("approval", func(ctx context.Context) error {
-			return m.app.Client().Respond(ctx, pen.RpcId, protocol.ApprovalResponse{
+			err := m.app.Client().Respond(ctx, pen.RpcId, protocol.ApprovalResponse{
 				SessionId: pen.SessionId, ApprovalId: pen.ApprovalId, Outcome: decide,
 			})
+			if err == nil {
+				// The host accepted the verdict: settle the parked frame
+				// locally. A resolved frame that still lands (the legacy
+				// dialect, the session-log decided side) finds an empty
+				// slot, so the toast fires once.
+				m.st.ApprovalResolved(pen.ApprovalId, decide)
+			}
+			return err
 		}), true
 	case *questionModal:
 		if mod.sub {
@@ -3334,7 +3342,14 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 			ans := qs.answers()
 			pen := qs.pen
 			return m.runCmd("answer", func(ctx context.Context) error {
-				return m.app.Client().Respond(ctx, pen.RpcId, ans)
+				err := m.app.Client().Respond(ctx, pen.RpcId, ans)
+				if err == nil {
+					// The host accepted the batch: settle it locally (the
+					// new dialect never sends the resolved frame, so
+					// without this the ctrl+i strip stays lit).
+					m.st.QuestionResolved(pen.RpcId, "answered")
+				}
+				return err
 			}), true
 		}
 		if km.Type == tea.KeyEsc {

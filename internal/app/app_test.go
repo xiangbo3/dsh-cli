@@ -47,6 +47,9 @@ func writeRPCValue(t *testing.T, w http.ResponseWriter, value any) {
 func workspaceHost(t *testing.T, createSeen *map[string]any) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok") // the legacy build's bare index
+	})
 	mux.HandleFunc("/api/workspace.list", func(w http.ResponseWriter, r *http.Request) {
 		writeRPCValue(t, w, protocol.WorkspaceListResponse{
 			Items: []protocol.WorkspaceView{{
@@ -158,6 +161,9 @@ func TestCreateSessionMapsRegisteredPathToWorkspace(t *testing.T) {
 func presetCreateHost(t *testing.T, presets []protocol.AgentPresetEntry, createSeen *map[string]any) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok") // the legacy build's bare index
+	})
 	mux.HandleFunc("/api/agentPreset.list", func(w http.ResponseWriter, r *http.Request) {
 		writeRPCValue(t, w, protocol.AgentPresetListResponse{Presets: presets})
 	})

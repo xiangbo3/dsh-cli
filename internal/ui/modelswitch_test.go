@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -205,7 +206,12 @@ func TestTranscriptFlushesOnModelSwitch(t *testing.T) {
 func TestPickerEnterRecordsSelection(t *testing.T) {
 	var gotEffort string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/session.selectModel" {
+		switch r.URL.Path {
+		case "/":
+			io.WriteString(w, "ok") // the legacy build's bare index
+			return
+		case "/api/session.selectModel":
+		default:
 			http.NotFound(w, r)
 			return
 		}

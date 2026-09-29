@@ -509,12 +509,6 @@ type TurnEndEventData struct {
 	Reason TurnEndReason `json:"reason"`
 }
 
-// StepEventData is the data of step/start and step/end events.
-type StepEventData struct {
-	Turn int `json:"turn"`
-	Step int `json:"step"`
-}
-
 // TodoWriteEventData is the data of a "todo/write" event.
 type TodoWriteEventData struct {
 	Todos []TodoItem `json:"todos"`

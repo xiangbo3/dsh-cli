@@ -138,7 +138,7 @@ func TestMiniViewKeepsTopBar(t *testing.T) {
 	m := NewModel(a)
 	m.splashOff = true
 
-	for _, size := range [][2]int{{40, 5}, {40, 4}, {10, 3}, {10, 2}} {
+	for _, size := range [][2]int{{40, 7}, {40, 6}, {40, 5}, {40, 4}, {10, 3}, {10, 2}} {
 		m.W, m.H = size[0], size[1]
 		lines := strings.Split(m.View(), "\n")
 		if len(lines) > m.H {
@@ -295,5 +295,45 @@ func TestTopBarClockCentered(t *testing.T) {
 		if w < 37 && centered {
 			t.Fatalf("topBar(%d) shows a clock with no room for it: %q", w, got)
 		}
+	}
+}
+
+// TestTopBarSurvivesTallInput pins the frame budget in a pathological
+// window: a multi-line input taller than the window must not overrun the
+// frame — the alt-screen renderer clips overflow from the top, eating the
+// persistent top bar. The deck keeps the tail of the input and line one
+// stays the top bar.
+func TestTopBarSurvivesTallInput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	a := app.New(newFakeHost(t).URL)
+	a.Start(ctx)
+	m := NewModel(a)
+	m.splashOff = true
+	m.W, m.H = 80, 10
+
+	// Far more text than a 10-row window can show at 78 columns per row.
+	for i := 0; i < 2400; i++ {
+		if i%5 == 4 {
+			m.inp.insertRune(' ')
+		} else {
+			m.inp.insertRune('x')
+		}
+	}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != m.H {
+		t.Fatalf("frame %d lines, want %d (a too-tall frame clips the top bar)", len(lines), m.H)
+	}
+	if !strings.Contains(stripANSI(lines[0]), nameVer) {
+		t.Fatalf("top bar not first line: %q", stripANSI(lines[0]))
+	}
+	// A normal window with the same text keeps the exact-height contract.
+	m.H = 40
+	lines = strings.Split(m.View(), "\n")
+	if len(lines) != m.H {
+		t.Fatalf("frame %d lines, want %d", len(lines), m.H)
+	}
+	if !strings.Contains(stripANSI(lines[0]), nameVer) {
+		t.Fatalf("top bar not first line: %q", stripANSI(lines[0]))
 	}
 }
