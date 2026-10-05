@@ -479,7 +479,7 @@ func TestUserMessageDropsMatchingEcho(t *testing.T) {
 }
 
 // TestItemRenderIdentity pins the Gen/Ver contract the UI render cache
-// relies on: Gen is unique per transcript and stable per item; every
+// relies on: Gen is unique process-wide and stable per item; every
 // mutation republishes the item through a fresh pointer (COW) with the
 // same Gen and a bumped Ver, so a changed row re-renders and an untouched
 // row does not.
@@ -562,4 +562,27 @@ func toolResultEv(t *testing.T, callId string) *protocol.SessionEvent {
 				"content": []any{map[string]any{"type": "text", "text": "done"}}}},
 		},
 	})
+}
+
+// TestGenUniqueAcrossTranscripts pins the process-wide Gen space: rebuild
+// (LoadTail) and the older-page merge (Prepend) hand the store items
+// stamped by a different Transcript instance, and a per-instance counter
+// would re-issue the Gens of rows already in the render cache — a (Gen,
+// Ver) collision that serves superseded lines.
+func TestGenUniqueAcrossTranscripts(t *testing.T) {
+	a := NewTranscript()
+	b := NewTranscript()
+	seen := map[int]bool{}
+	for i := 0; i < 50; i++ {
+		for _, tr := range []*Transcript{a, b} {
+			g := tr.stamp(&Item{Kind: KindUser}).Gen
+			if g == 0 {
+				t.Fatal("Gen must be non-zero")
+			}
+			if seen[g] {
+				t.Fatalf("Gen %d reused across transcripts", g)
+			}
+			seen[g] = true
+		}
+	}
 }

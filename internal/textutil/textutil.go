@@ -142,6 +142,15 @@ func StripANSI(s string) string {
 	return b.String()
 }
 
+// StripTerminal is the ingress sanitizer for any host-provided text that
+// reaches the screen: StripANSI drops well-formed escape sequences, then
+// StripControl removes the control runes a broken sequence leaves behind.
+// The renderer writes to the same tty, so a surviving escape executes
+// mid-frame and clobbers the pinned chrome.
+func StripTerminal(s string) string {
+	return StripControl(StripANSI(s))
+}
+
 // HumanDuration renders d in user-friendly units instead of raw seconds: the
 // two most significant non-zero units at most — "45s", "2m 5s", "1h 30m",
 // "1d 4h". Trailing zero units are omitted (an exact minute reads "5m",

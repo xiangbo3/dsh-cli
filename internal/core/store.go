@@ -199,7 +199,7 @@ func (s *Store) pushNotice(n Notice) {
 	// Host-shaped text (errors, reasons) arrives here from JSON: strip
 	// control runes once at the ingress so no toast path can inject ANSI/VT
 	// into the terminal.
-	n.Text = textutil.StripControl(textutil.StripANSI(n.Text))
+	n.Text = textutil.StripTerminal(n.Text)
 	select {
 	case s.notices <- n:
 	default:
@@ -463,7 +463,7 @@ func decodeTitle(v json.RawMessage) string {
 	if json.Unmarshal(v, &t) != nil {
 		return ""
 	}
-	return textutil.StripANSI(t)
+	return textutil.StripTerminal(t)
 }
 
 // CtxModel is the transcript-header and top-bar read: the session's
@@ -598,7 +598,7 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.Tok
 				st.Running = false
 				setSummary(st, func(s *protocol.SessionSummary) { s.Running = false })
 			}
-			info := &TurnEndInfo{Kind: d.Reason.Kind, Reason: textutil.StripControl(d.Reason.Reason), At: time.Now()}
+			info := &TurnEndInfo{Kind: d.Reason.Kind, Reason: textutil.StripTerminal(d.Reason.Reason), At: time.Now()}
 			if ms := st.T.TurnStartAt; ms > 0 && info.Ms == 0 && ev.Time > ms {
 				info.Ms = ev.Time - ms
 			}
@@ -606,7 +606,7 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.Tok
 			info.Out = st.T.TurnTokens.Out
 			info.Cache = st.T.TurnTokens.Cache
 			if d.Reason.Error != nil {
-				info.Error = textutil.StripControl(d.Reason.Error.Message)
+				info.Error = textutil.StripTerminal(d.Reason.Error.Message)
 			}
 			st.flash = info
 			info.Sess = id
@@ -625,20 +625,20 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.Tok
 		var d protocol.TodoWriteEventData
 		if json.Unmarshal(ev.Data, &d) == nil {
 			for i := range d.Todos {
-				d.Todos[i].Content = textutil.StripANSI(d.Todos[i].Content)
+				d.Todos[i].Content = textutil.StripTerminal(d.Todos[i].Content)
 			}
 			st.Todos = d.Todos
 		}
 	case "session/title":
 		var d protocol.TitleEventData
 		if json.Unmarshal(ev.Data, &d) == nil && d.Title != "" {
-			st.title = textutil.StripANSI(d.Title)
+			st.title = textutil.StripTerminal(d.Title)
 		}
 	case "goal/change":
 		var d protocol.GoalChangeData
 		if json.Unmarshal(ev.Data, &d) == nil {
 			if d.Goal != nil {
-				d.Goal.Objective = textutil.StripANSI(d.Goal.Objective)
+				d.Goal.Objective = textutil.StripTerminal(d.Goal.Objective)
 				st.Goal = &protocol.GoalProjected{Goal: d.Goal, RoundsStarted: d.RoundsStarted}
 			} else {
 				st.Goal = nil
@@ -718,7 +718,9 @@ func (s *Store) MuxQueue(id string, items []protocol.QueuedInboxItem) {
 		}
 	}
 	st.Queue = items
-	st.Running = true // pending work implies an active queue
+	if len(items) > 0 {
+		st.Running = true // pending work implies an active queue
+	}
 	s.pushDirty()
 	s.mu.Unlock()
 }
@@ -728,8 +730,8 @@ func (s *Store) MuxJobs(id string, jobs []protocol.JobView) {
 	s.mu.Lock()
 	st := s.Sess(id)
 	for i := range jobs {
-		jobs[i].Label = textutil.StripANSI(jobs[i].Label)
-		jobs[i].Detail = textutil.StripANSI(jobs[i].Detail)
+		jobs[i].Label = textutil.StripTerminal(jobs[i].Label)
+		jobs[i].Detail = textutil.StripTerminal(jobs[i].Detail)
 	}
 	st.Jobs = jobs
 	s.pushDirty()
@@ -855,7 +857,7 @@ func (s *Store) SetWorkspaces(items []protocol.WorkspaceView, archived []string)
 		if w.WorkspaceId == "" {
 			continue
 		}
-		w.Title = textutil.StripANSI(w.Title)
+		w.Title = textutil.StripTerminal(w.Title)
 		s.workspaces[w.WorkspaceId] = &w
 		s.wsOrder = append(s.wsOrder, w.WorkspaceId)
 	}
@@ -914,7 +916,7 @@ func (s *Store) workspaceUpsertLocked(v *protocol.WorkspaceView) {
 	if v.WorkspaceId == "" {
 		return
 	}
-	v.Title = textutil.StripANSI(v.Title)
+	v.Title = textutil.StripTerminal(v.Title)
 	if _, ok := s.workspaces[v.WorkspaceId]; !ok {
 		s.wsOrder = append(s.wsOrder, v.WorkspaceId)
 	}
@@ -1082,7 +1084,7 @@ func (s *Store) CacheRoster(rows []CacheRow) bool {
 		// anything live — a title event or a re-baselined projection — is
 		// newer than the previous boot by definition and must win.
 		if r.Title != "" {
-			st.title = textutil.StripANSI(r.Title)
+			st.title = textutil.StripTerminal(r.Title)
 		}
 	}
 	s.rosterCashed = true
@@ -1104,7 +1106,7 @@ func (s *Store) CacheWorkspaces(items []protocol.WorkspaceView, archived []strin
 		if w.WorkspaceId == "" {
 			continue
 		}
-		w.Title = textutil.StripANSI(w.Title)
+		w.Title = textutil.StripTerminal(w.Title)
 		s.workspaces[w.WorkspaceId] = &w
 		s.wsOrder = append(s.wsOrder, w.WorkspaceId)
 	}
@@ -1673,7 +1675,7 @@ func (s *Store) EnsureRow(id string) {
 func (s *Store) SetTitle(id, title string) {
 	s.mu.Lock()
 	if st := s.sessions[id]; st != nil {
-		st.title = title
+		st.title = textutil.StripTerminal(title)
 		s.pushDirty()
 	}
 	s.mu.Unlock()
@@ -1714,8 +1716,8 @@ func (s *Store) JobsFor(id string) []protocol.JobView {
 
 // ApprovalsFor returns pending approvals of one session.
 func (s *Store) ApprovalsFor(id string) []*ApprovalPend {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	st := s.sessions[id]
 	if st == nil {
 		return nil
@@ -1729,8 +1731,8 @@ func (s *Store) ApprovalsFor(id string) []*ApprovalPend {
 
 // QuestionsFor returns pending question batches of one session.
 func (s *Store) QuestionsFor(id string) []*QuestionPend {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	st := s.sessions[id]
 	if st == nil {
 		return nil

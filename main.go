@@ -207,7 +207,7 @@ func reorderFlags(args []string) []string {
 			if i := strings.IndexByte(name, '='); i >= 0 {
 				name = name[:i]
 			}
-			if isValueFlag(name) && !strings.Contains(arg, "=") && i+1 < len(args) {
+			if isValueFlag(name) && !strings.Contains(arg, "=") && i+1 < len(args) && args[i+1] != "--" {
 				flags = append(flags, args[i+1])
 				i++
 			}

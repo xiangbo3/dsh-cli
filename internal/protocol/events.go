@@ -3,7 +3,10 @@
 
 package protocol
 
-// SessionTextMessage extracts the concatenated text content of a message.
+import "dsh-cli/internal/textutil"
+
+// SessionTextMessage extracts the concatenated text content of a message,
+// stripped of terminal escapes (pasted terminal output carries them).
 func SessionTextMessage(m *Message) string {
 	var out []byte
 	for _, b := range m.Content {
@@ -14,7 +17,7 @@ func SessionTextMessage(m *Message) string {
 			out = append(out, b.Text...)
 		}
 	}
-	return string(out)
+	return textutil.StripTerminal(string(out))
 }
 
 // ToolResultText extracts the readable text of a tool-result block list.
@@ -35,5 +38,5 @@ func ToolResultText(blocks []ContentBlock) string {
 		}
 		joined += s
 	}
-	return joined
+	return textutil.StripTerminal(joined)
 }

@@ -111,6 +111,73 @@ func (c *Client) Models(ctx context.Context, sessionId string) (*protocol.Sessio
 	return &v, nil
 }
 
+// DiscoverModels asks a provider endpoint for the models it serves.
+// The new wire uses llm/discoverModels (a draft route, keyed by the
+// settings namespace); the legacy wire falls back to the old listModels
+// shape (a bare provider name). Neither call writes settings.
+func (c *Client) DiscoverModels(ctx context.Context, settingsNs string, req protocol.DiscoverRequest) ([]protocol.DiscoveredModel, error) {
+	d, err := c.ensureDialect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []protocol.DiscoveredModel
+	if d != DialectNew {
+		if _, err := c.post(ctx, protocol.MLlmModels, protocol.MLlmModels, mustJSON(req.Provider), false, "", &out); err == nil || !isNotFound(err) {
+			return out, err
+		}
+	}
+	if err := c.call(ctx, "llm.discoverModels", struct {
+		SettingsNs string                   `json:"settingsNs"`
+		Request    protocol.DiscoverRequest `json:"request"`
+	}{settingsNs, req}, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ConfigurableProviders lists the host's configurable providers with
+// their settings locations (new wire only; the legacy host answers
+// ErrNotFound and the caller falls back to a describe-value scan).
+func (c *Client) ConfigurableProviders(ctx context.Context) ([]protocol.ConfigurableProvider, error) {
+	d, err := c.ensureDialect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if d != DialectNew {
+		return nil, ErrNotFound
+	}
+	var out []protocol.ConfigurableProvider
+	if _, err := c.post(ctx, "llm/listConfigurableProviders", "llm/listConfigurableProviders", []byte(`{"args":{}}`), false, "", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SettingsDescribe reads every settings namespace (values stay raw).
+func (c *Client) SettingsDescribe(ctx context.Context) (*protocol.SettingsDescription, error) {
+	var v protocol.SettingsDescription
+	if err := c.call(ctx, "settings.describe", struct{}{}, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// SettingsMutate applies path ops to one namespace and returns the new
+// view. The revision is read from the fresh describe; a concurrent
+// writer between the two reads surfaces as a host-side mismatch error.
+func (c *Client) SettingsMutate(ctx context.Context, ns string, ops []protocol.SettingOp) (*protocol.SettingNamespaceView, error) {
+	var v protocol.SettingNamespaceView
+	payload := struct {
+		Ns               string           `json:"ns"`
+		Ops              []protocol.SettingOp `json:"ops"`
+		ExpectedRevision *int64           `json:"expectedRevision,omitempty"`
+	}{ns, ops, nil}
+	if err := c.call(ctx, "settings.mutate", payload, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 // SelectModel sets the session's model selection.
 func (c *Client) SelectModel(ctx context.Context, sessionId, provider, model, reasoningEffort string) (*protocol.ModelSelection, error) {
 	payload := struct {

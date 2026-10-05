@@ -506,8 +506,10 @@ func killWeb(base string) error {
 	port := portOf(mustParse(base))
 	pids, lerr := listeners(port)
 	if lerr != nil {
-		// lsof missing (or unreadable): the broad fallback, then poll
-		if pk := exec.Command("pkill", "-f", "dsh web"); pk.Run() != nil && len(pids) == 0 {
+		// lsof missing (or unreadable): the broad fallback, then poll.
+		// The pattern carries the port so a dsh web on another port
+		// survives.
+		if pk := exec.Command("pkill", "-f", "dsh web( --port "+port+")?"); pk.Run() != nil && len(pids) == 0 {
 			return fmt.Errorf("no lsof and pkill found no dsh web: %w", lerr)
 		}
 	}

@@ -5,6 +5,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -205,6 +206,11 @@ type Model struct {
 	// in place (it had already run); the next new session starts from it,
 	// mirroring the web hero-chip staging.
 	stagedMode string
+
+	// stagedModel holds a model pick made with no session current; the
+	// top bar readout shows it meanwhile, and the first session that
+	// becomes current takes it (mirroring stagedMode).
+	stagedModel *protocol.ModelSelection
 }
 
 type toast struct {
@@ -295,6 +301,17 @@ type modelsLoadedMsg struct {
 	// err != "" while the catalog fetch failed (loading stays off, the
 	// picker body shows the problem).
 	err string
+}
+// modelsFetchedMsg carries one provider's discovered models back to the
+// picker (err != "" when the endpoint refused or the network failed).
+type modelsFetchedMsg struct {
+	provider string
+	models   []protocol.DiscoveredModel
+	err      string
+}
+// modelsRefreshMsg asks for a fresh catalog after a settings change.
+type modelsRefreshMsg struct {
+	id string
 }
 type skillsLoadedMsg struct {
 	id     string
@@ -633,7 +650,14 @@ func (m *Model) modeLabel(id string) string {
 // ctxLabel is the model label for the transcript header: one cheap store
 // read (no snapshot copies), resolved once per render pass and handed to
 // the item renderers as a parameter.
-func (m *Model) ctxLabel() string { return m.st.CtxModel(m.activeID()) }
+func (m *Model) ctxLabel() string {
+	// A staged pick made with no session current stands in for the
+	// host default in the readout until a session takes the pick.
+	if m.activeID() == "" && m.stagedModel != nil {
+		return m.stagedModel.Model
+	}
+	return m.st.CtxModel(m.activeID())
+}
 
 // resetTrans discards the transcript render cache and marks the next frame
 // dirty: without the mark, the idle-frame short-circuit would keep serving
@@ -845,6 +869,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case modelsFetchedMsg:
+		pk, ok := m.topModal().(*modelPicker)
+		if !ok {
+			return m, nil
+		}
+		pk.fetching = false
+		if msg.err != "" {
+			pk.fetchNote = msg.err
+			return m, nil
+		}
+		fresh := pk.freshModels(msg.provider, msg.models)
+		if len(fresh) == 0 {
+			m.addToast(core.Notice{Level: "info", Text: m.loc.T("model.no.fresh")})
+			return m, nil
+		}
+		// The new models get their own window: every row starts checked,
+		// enter confirms the add.
+		m.openModal(newAddModelPicker(m.loc, msg.provider, fresh))
+		return m, nil
+
+	case modelsRefreshMsg:
+		// Close the add window: the picker beneath it must read the fresh
+		// catalog.
+		if _, ok := m.topModal().(*addModelPicker); ok {
+			m.closeModal()
+		}
+		return m, m.cmdCatalog(msg.id)
+
 	case skillsLoadedMsg:
 		// The fetch ran off the event loop; store the result (negative
 		// cache included), then re-merge the menu from the fresh cache.
@@ -932,8 +984,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resetTrans()
 			m.follow = true
 			m.inp.clear()
-			// Continue the actions parked for this new session.
+			// Continue the actions parked for this new session; a staged
+			// model pick lands before the parked prompt so the first
+			// message runs on the picked model.
 			var cmds []tea.Cmd
+			if c := m.consumeStagedModel(msg.id); c != nil {
+				cmds = append(cmds, c)
+			}
 			if m.pendingPrompt != "" {
 				text := m.pendingPrompt
 				m.pendingPrompt = ""
@@ -2471,6 +2528,9 @@ func (m *Model) selectSession(id string) tea.Cmd {
 			}))
 		}
 	}
+	if c := m.consumeStagedModel(id); c != nil {
+		cmds = append(cmds, c)
+	}
 	if len(cmds) == 1 {
 		return cmds[0]
 	}
@@ -2535,7 +2595,14 @@ func (m *Model) ensureSession() (string, tea.Cmd) {
 	for _, r := range rows {
 		if !r.Blank {
 			m.st.SetActive(r.Id)
-			return r.Id, tea.Sequence(m.cmdLoadTail(r.Id), m.cmdLoadModels(r.Id))
+			cmds := []tea.Cmd{m.cmdLoadTail(r.Id), m.cmdLoadModels(r.Id)}
+			if c := m.consumeStagedModel(r.Id); c != nil {
+				cmds = append(cmds, c)
+			}
+			if len(cmds) == 1 {
+				return r.Id, cmds[0]
+			}
+			return r.Id, tea.Sequence(cmds...)
 		}
 	}
 	// Nothing to select: create one; createMsg continues the pending
@@ -3131,15 +3198,203 @@ func (m *Model) surfacePending(auto bool) bool {
 
 // openModelPicker loads the catalog and opens the picker.
 func (m *Model) openModelPicker() tea.Cmd {
+	// Without a current session the catalog is the host's global one
+	// (session.models takes an empty id), and a pick stages.
 	id := m.activeID()
-	if id == "" {
-		m.addToast(core.Notice{Level: "info", Text: "no session — create one first"})
-		return nil
-	}
 	pk := newModelPicker()
 	pk.loc = m.loc
 	pk.loading = true
 	m.openModal(pk)
+	return m.cmdCatalog(id)
+}
+
+// cmdFetchModels probes the cursor's provider endpoint for the models it
+// serves and lands them as modelsFetchedMsg (the handler opens the add
+// dialog with the models the catalog lacks).
+func (m *Model) cmdFetchModels(mod *modelPicker) tea.Cmd {
+	if mod.fetching || len(mod.rows) == 0 {
+		return nil
+	}
+	provider := mod.rows[mod.cur].providerID
+	mod.fetching = true
+	mod.fetchNote = ""
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		desc, err := m.app.SettingsDescribe(ctx)
+		if err != nil {
+			return modelsFetchedMsg{provider: provider, err: errText(err, "fetch models")}
+		}
+		ns, path := m.locateProviderSettings(ctx, desc, provider)
+		if ns == "" {
+			return modelsFetchedMsg{provider: provider, err: m.loc.T("model.no.settings", provider)}
+		}
+		req := protocol.DiscoverRequest{Provider: provider}
+		if raw, ok := settingPathValue(desc, ns, path); ok {
+			// pi-ai probes with the stored draft route (baseURL + api).
+			var cfg struct {
+				BaseURL string `json:"baseURL"`
+				Api     string `json:"api"`
+			}
+			_ = json.Unmarshal(raw, &cfg)
+			req.BaseURL, req.Api = cfg.BaseURL, cfg.Api
+		}
+		models, err := m.app.DiscoverModels(ctx, ns, req)
+		if err != nil {
+			return modelsFetchedMsg{provider: provider, err: textutil.StripControl(errText(err, "fetch models"))}
+		}
+		return modelsFetchedMsg{provider: provider, models: models}
+	}
+}
+
+// cmdAddModels appends the checked models to the provider's stored models
+// array, then refreshes the catalog.
+func (m *Model) cmdAddModels(mod *addModelPicker) tea.Cmd {
+	picked := mod.checkedModels()
+	if len(picked) == 0 {
+		m.addToast(core.Notice{Level: "warn", Text: m.loc.T("model.check.first")})
+		return nil
+	}
+	provider := mod.provider
+	id := m.activeID()
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var err error
+		var added int
+		desc, dErr := m.app.SettingsDescribe(ctx)
+		if dErr == nil {
+			ns, path := m.locateProviderSettings(ctx, desc, provider)
+			if ns == "" {
+				err = errors.New(m.loc.T("model.no.settings", provider))
+			} else {
+				cur, _ := settingPathValue(desc, ns, append(append([]string{}, path...), "models"))
+				added, err = m.addDiscoveredModels(ctx, ns, path, cur, picked)
+			}
+		} else {
+			err = dErr
+		}
+		if err != nil {
+			m.st.Notify(core.Notice{Level: errLevel(err), Text: errText(err, "add model"), Bell: true})
+			return rpcErrMsg{op: "add model", err: err}
+		}
+		m.st.Notify(core.Notice{Level: "ok", Text: m.loc.T("model.added", added, provider)})
+		return modelsRefreshMsg{id: id}
+	}
+}
+
+// locateProviderSettings finds where a provider's models live in the
+// settings: the new host's provider directory first, a describe-value
+// scan (providers entry) for the legacy wire.
+func (m *Model) locateProviderSettings(ctx context.Context, desc *protocol.SettingsDescription, provider string) (string, []string) {
+	if cfgs, err := m.app.ConfigurableProviders(ctx); err == nil {
+		for _, c := range cfgs {
+			if c.Provider == provider {
+				return c.SettingsNs, c.SettingsPath
+			}
+		}
+	}
+	for _, n := range desc.Namespaces {
+		var body struct {
+			Providers map[string]json.RawMessage `json:"providers"`
+		}
+		if json.Unmarshal(n.Value, &body) == nil {
+			if _, ok := body.Providers[provider]; ok {
+				return n.Ns, []string{"providers", provider}
+			}
+		}
+	}
+	return "", nil
+}
+
+// settingPathValue walks one namespace value along a settings path.
+func settingPathValue(desc *protocol.SettingsDescription, ns string, path []string) (json.RawMessage, bool) {
+	for _, n := range desc.Namespaces {
+		if n.Ns != ns {
+			continue
+		}
+		cur := n.Value
+		for _, p := range path {
+			var obj map[string]json.RawMessage
+			if json.Unmarshal(cur, &obj) != nil {
+				return nil, false
+			}
+			next, ok := obj[p]
+			if !ok {
+				return nil, false
+			}
+			cur = next
+		}
+		return cur, true
+	}
+	return nil, false
+}
+
+// addDiscoveredModels appends picked to the stored models array (existing
+// entries kept, ids deduped) and mutates the namespace; it returns the
+// number of entries appended.
+func (m *Model) addDiscoveredModels(ctx context.Context, ns string, path []string, curModels json.RawMessage, picked []protocol.DiscoveredModel) (int, error) {
+	var existing []json.RawMessage
+	if len(curModels) > 0 {
+		_ = json.Unmarshal(curModels, &existing)
+	}
+	have := map[string]bool{}
+	for _, e := range existing {
+		var entry map[string]any
+		if json.Unmarshal(e, &entry) == nil {
+			if id, ok := entry["id"].(string); ok {
+				have[id] = true
+			}
+		}
+	}
+	var fresh []json.RawMessage
+	for _, mo := range picked {
+		if have[mo.Id] {
+			continue
+		}
+		have[mo.Id] = true
+		raw, err := json.Marshal(modelEntry(ns, mo))
+		if err != nil {
+			return 0, err
+		}
+		fresh = append(fresh, raw)
+	}
+	if len(fresh) == 0 {
+		return 0, nil
+	}
+	opts := append(append([]string{}, path...), "models")
+	if _, err := m.app.SettingsMutate(ctx, ns, []protocol.SettingOp{{Op: "set", Path: opts, Value: append(existing, fresh...)}}); err != nil {
+		return 0, err
+	}
+	return len(fresh), nil
+}
+
+// modelEntry is one settings model entry for a discovered model (pi-ai
+// stores modalities under input, the deepseek family under inputModalities).
+func modelEntry(ns string, mo protocol.DiscoveredModel) map[string]any {
+	e := map[string]any{"id": mo.Id}
+	if mo.Name != "" && mo.Name != mo.Id {
+		e["name"] = mo.Name
+	}
+	if mo.ContextWindow > 0 {
+		e["contextWindow"] = mo.ContextWindow
+	}
+	if mo.MaxTokens > 0 {
+		e["maxTokens"] = mo.MaxTokens
+	}
+	if len(mo.InputModalities) > 0 {
+		if ns == "llm-pi-ai" {
+			e["input"] = mo.InputModalities
+		} else {
+			e["inputModalities"] = mo.InputModalities
+		}
+	}
+	return e
+}
+
+// cmdCatalog fetches the advisory model directory for the session and
+// lands it as modelsLoadedMsg (the picker and the top bar both read it).
+func (m *Model) cmdCatalog(id string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -3158,11 +3413,7 @@ func (m *Model) openModelPicker() tea.Cmd {
 // resolveModelName), and the selection applied with the host's default
 // reasoning effort.
 func (m *Model) cmdSelectModelByName(name string) tea.Cmd {
-	id := m.activeID()
-	if id == "" {
-		m.addToast(core.Notice{Level: "info", Text: "no session — create one first"})
-		return nil
-	}
+	id := m.activeID() // "": the catalog is the host's global one; the pick stages
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -3176,6 +3427,13 @@ func (m *Model) cmdSelectModelByName(name string) tea.Cmd {
 			m.st.Notify(core.Notice{Level: "warn", Text: "model: " + problem})
 			return dirtyMsg{}
 		}
+		if id == "" {
+			m.stageModel(provider, modelID, "")
+			return dirtyMsg{}
+		}
+		// The readout follows the pick, not the round-trip (see the picker
+		// confirm path).
+		m.st.ApplyModelSelection(id, &protocol.ModelSelection{Provider: provider, Model: modelID})
 		sel, err := m.app.SelectModel(ctx, id, provider, modelID, "")
 		if err != nil {
 			m.st.Notify(core.Notice{Level: errLevel(err), Text: errText(err, "select model"), Bell: true})
@@ -3188,6 +3446,40 @@ func (m *Model) cmdSelectModelByName(name string) tea.Cmd {
 		m.st.Notify(core.Notice{Level: "ok", Text: "model: " + provider + "/" + modelID})
 		return dirtyMsg{}
 	}
+}
+
+// stageModel records a model pick made with no session current: the top
+// bar readout shows it immediately, and the first session that becomes
+// current applies it (consumeStagedModel).
+func (m *Model) stageModel(provider, model, effort string) {
+	m.stagedModel = &protocol.ModelSelection{Provider: provider, Model: model, ReasoningEffort: effort}
+	m.addToast(core.Notice{Level: "ok", Text: m.loc.T("model.staged", provider+"/"+model+effortSuffix(effort))})
+}
+
+// consumeStagedModel hands the pending session-less model pick to the
+// session that just became current, returning its apply command (nil
+// when nothing is staged or the session already runs that model).
+func (m *Model) consumeStagedModel(id string) tea.Cmd {
+	sm := m.stagedModel
+	if sm == nil {
+		return nil
+	}
+	m.stagedModel = nil
+	if snap := m.st.Get(id); snap != nil && snap.ModelSel != nil &&
+		snap.ModelSel.Provider == sm.Provider && snap.ModelSel.Model == sm.Model {
+		return nil
+	}
+	return m.runCmd("select model", func(ctx context.Context) error {
+		sel, err := m.app.SelectModel(ctx, id, sm.Provider, sm.Model, sm.ReasoningEffort)
+		if err == nil {
+			if sel == nil {
+				sel = &protocol.ModelSelection{Provider: sm.Provider, Model: sm.Model, ReasoningEffort: sm.ReasoningEffort}
+			}
+			m.st.ApplyModelSelection(id, sel)
+			m.st.Notify(core.Notice{Level: "ok", Text: "model: " + sm.Provider + "/" + sm.Model + effortSuffix(sm.ReasoningEffort)})
+		}
+		return err
+	})
 }
 
 type modelCandidate struct{ provider, id, display string }
@@ -3359,6 +3651,9 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 			m.addToast(core.Notice{Level: "info", Text: m.loc.T("question.parked")})
 		}
 	case *modelPicker:
+		if km.String() == "f" {
+			return m.cmdFetchModels(mod), true
+		}
 		if km.Type == tea.KeyEnter {
 			if mod.loading {
 				// The catalog is still in flight: confirming now would
@@ -3374,6 +3669,14 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 			}
 			id := m.activeID()
 			m.closeModal()
+			if id == "" {
+				m.stageModel(provider, modelID, effort)
+				return nil, true
+			}
+			// The readout follows the pick, not the round-trip: on a failed
+			// select the toast reports it and the next request/context event
+			// corrects the readout with the host's real model.
+			m.st.ApplyModelSelection(id, &protocol.ModelSelection{Provider: provider, Model: modelID, ReasoningEffort: effort})
 			return m.runCmd("select model", func(ctx context.Context) error {
 				sel, err := m.app.SelectModel(ctx, id, provider, modelID, effort)
 				if err == nil {
@@ -3385,6 +3688,39 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 				}
 				return err
 			}), true
+		}
+		if km.Type == tea.KeyEsc {
+			m.closeModal()
+		}
+	case *addModelPicker:
+		if km.Type == tea.KeyEnter {
+			if mod.adding {
+				return nil, true
+			}
+			if mod.checkedCount() == 0 {
+				m.addToast(core.Notice{Level: "warn", Text: m.loc.T("model.check.first")})
+				return nil, true
+			}
+			mod.adding = true
+			return m.cmdAddModels(mod), true
+		}
+		if km.Type == tea.KeySpace {
+			if !mod.adding {
+				mod.toggle()
+			}
+			return nil, true
+		}
+		if km.Type == tea.KeyUp {
+			if mod.cur > 0 {
+				mod.cur--
+			}
+			return nil, true
+		}
+		if km.Type == tea.KeyDown {
+			if mod.cur < len(mod.models)-1 {
+				mod.cur++
+			}
+			return nil, true
 		}
 		if km.Type == tea.KeyEsc {
 			m.closeModal()

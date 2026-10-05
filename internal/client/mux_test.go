@@ -45,7 +45,7 @@ func findFrame(frames []DownlinkFrame, kind string) *DownlinkFrame {
 // them).
 func TestMuxReadyRecordsHostFacts(t *testing.T) {
 	s, m := newMuxTest(t)
-	m.emit(&muxSub{endpoint: "$events"}, []byte(`{"type":"ready","clientId":"cli-7","host":{"home":"/srv"}}`))
+	m.emit(&muxSub{endpoint: "$events"}, "$events", []byte(`{"type":"ready","clientId":"cli-7","host":{"home":"/srv"}}`))
 	if s.conn.ClientID() != "cli-7" {
 		t.Fatalf("clientId = %q, want cli-7", s.conn.ClientID())
 	}
@@ -60,7 +60,7 @@ func TestMuxReadyRecordsHostFacts(t *testing.T) {
 func TestMuxFollowEventReemits(t *testing.T) {
 	s, m := newMuxTest(t)
 	sub := &muxSub{endpoint: "session/follow", addr: FollowAddr{Kind: "session", SessionId: "s1"}}
-	m.emit(sub, []byte(`{"type":"event","event":{"type":"session/title","seq":3,"time":1,"data":{"title":"t"}}}`))
+	m.emit(sub, sub.endpoint, []byte(`{"type":"event","event":{"type":"session/title","seq":3,"time":1,"data":{"title":"t"}}}`))
 	frames := drainFrames(t, s)
 	f := findFrame(frames, "session/event")
 	if f == nil {
@@ -74,7 +74,7 @@ func TestMuxFollowEventReemits(t *testing.T) {
 func TestMuxSnapshotSetsCursorAndSubscribed(t *testing.T) {
 	s, m := newMuxTest(t)
 	sub := &muxSub{endpoint: "session/follow", addr: FollowAddr{Kind: "session", SessionId: "s1"}}
-	m.emit(sub, []byte(`{"type":"snapshot","header":{"id":"s1"},"cursor":42,"records":[]}`))
+	m.emit(sub, sub.endpoint, []byte(`{"type":"snapshot","header":{"id":"s1"},"cursor":42,"records":[]}`))
 	if got := s.conn.Cursor("s1"); got != 42 {
 		t.Fatalf("cursor = %d, want 42", got)
 	}
@@ -96,11 +96,11 @@ func TestMuxApprovalJoinAcrossStreams(t *testing.T) {
 	events := &muxSub{endpoint: "$events"}
 
 	// Asked side first: parks, no answerable frame yet.
-	m.emit(follow, []byte(`{"type":"event","event":{"type":"approval/asked","seq":5,"time":1,"data":{"id":"a1","toolName":"bash","callId":"c1","reason":"needs write"}}}`))
+	m.emit(follow, follow.endpoint, []byte(`{"type":"event","event":{"type":"approval/asked","seq":5,"time":1,"data":{"id":"a1","toolName":"bash","callId":"c1","reason":"needs write"}}}`))
 	drainFrames(t, s) // (drops the transcript session/event frame)
 
 	// Waterfall side: completes the join → the answerable frame.
-	m.emit(events, []byte(`{"type":"waterfall","event":"approval/request","eventId":"evt-9","agentId":"s1","request":{"toolName":"bash","callId":"c1","reason":"needs write"}}`))
+	m.emit(events, events.endpoint, []byte(`{"type":"waterfall","event":"approval/request","eventId":"evt-9","agentId":"s1","request":{"toolName":"bash","callId":"c1","reason":"needs write"}}`))
 	frames := drainFrames(t, s)
 	f := findFrame(frames, "approval/requested")
 	if f == nil {
@@ -119,7 +119,7 @@ func TestMuxApprovalJoinAcrossStreams(t *testing.T) {
 func TestMuxControlBaselineReemits(t *testing.T) {
 	s, m := newMuxTest(t)
 	sub := &muxSub{endpoint: "session/control"}
-	m.emit(sub, []byte(`{"type":"baseline","value":{"queues":{"s1":[{"id":"q1","placement":"queued","message":{"id":"q1","content":[{"type":"text","text":"hi"}]}}]},"jobs":{"s1":[]},"projections":{"s1":{"asOfSeq":9,"values":{"title":"t"}}}}}`))
+	m.emit(sub, sub.endpoint, []byte(`{"type":"baseline","value":{"queues":{"s1":[{"id":"q1","placement":"queued","message":{"id":"q1","content":[{"type":"text","text":"hi"}]}}]},"jobs":{"s1":[]},"projections":{"s1":{"asOfSeq":9,"values":{"title":"t"}}}}}`))
 	frames := drainFrames(t, s)
 	if findFrame(frames, "session/queue") == nil {
 		t.Fatalf("frames = %+v, want a session/queue frame", frames)
@@ -134,7 +134,7 @@ func TestMuxControlBaselineReemits(t *testing.T) {
 func TestMuxWorkspaceBaselineFeedsMirror(t *testing.T) {
 	s, m := newMuxTest(t)
 	sub := &muxSub{endpoint: "workspace/follow"}
-	m.emit(sub, []byte(`{"type":"baseline","value":{"items":[{"workspaceId":"w1","path":"/a","title":"a","sessionIds":[]}],"archivedSessionIds":["s9"]}}`))
+	m.emit(sub, sub.endpoint, []byte(`{"type":"baseline","value":{"items":[{"workspaceId":"w1","path":"/a","title":"a","sessionIds":[]}],"archivedSessionIds":["s9"]}}`))
 	items, archived, ok := s.conn.WorkspaceBaseline(t.Context())
 	if !ok {
 		t.Fatalf("workspace baseline not installed")

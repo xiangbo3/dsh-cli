@@ -94,7 +94,7 @@ func Ls(ctx context.Context, o Opts) error {
 		if title == "" {
 			title = loc.T("common.untitled")
 		}
-		fmt.Printf("%-8s %-9s %-36s %s %s\n", state, modes.Short(r.Mode), shortTime(r.UpdatedAt), title, r.Cwd)
+		fmt.Printf("%-8s %-9s %-36s %s %s\n", state, modes.Short(r.Mode), shortTime(r.UpdatedAt), textutil.Truncate(title, 36, ""), r.Cwd)
 	}
 	return nil
 }

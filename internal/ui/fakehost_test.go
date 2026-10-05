@@ -30,6 +30,13 @@ type fakeHost struct {
 	workspaces []protocol.WorkspaceView
 	histories  map[string][]protocol.HistoryEntry
 	subagents  []protocol.SubagentListEntry
+	models     protocol.SessionModels
+
+	// settings is the in-memory settings tree (ns → value); mutate ops
+	// apply to it, describe answers from it.
+	settings   map[string]json.RawMessage
+	discovered map[string][]protocol.DiscoveredModel
+	lastMutate [][]byte
 
 	mu      sync.Mutex
 	calls   []string
@@ -43,6 +50,12 @@ func newFakeHost(t *testing.T) *fakeHost {
 	fh := &fakeHost{
 		describe:  protocol.HostDescription{Version: "fake", Cwd: "/tmp/fakehost", Home: "/tmp/fakehost", CanOpenPath: true},
 		histories: map[string][]protocol.HistoryEntry{},
+		settings: map[string]json.RawMessage{
+			"llm-pi-ai": []byte(`{"providers":{"custom":{"baseURL":"http://upstream/v1","api":"openai-completions","models":[{"id":"m1","name":"M1"}]}}}`),
+		},
+		discovered: map[string][]protocol.DiscoveredModel{
+			"custom": {{Id: "m1", Name: "M1"}, {Id: "m2", Name: "M2", ContextWindow: 4096}},
+		},
 	}
 	fh.Server = httptest.NewServer(http.HandlerFunc(fh.handle))
 	t.Cleanup(fh.Server.Close)
@@ -177,6 +190,44 @@ func (fh *fakeHost) unary(method string, payload json.RawMessage) any {
 		}
 		_ = json.Unmarshal(payload, &p)
 		return map[string]any{"agentPreset": p.AgentPreset}
+	case protocol.MSessionModels:
+		return fh.models
+	case protocol.MSessionSelectModel:
+		var p struct {
+			Provider        string `json:"provider"`
+			Model           string `json:"model"`
+			ReasoningEffort string `json:"reasoningEffort"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		return map[string]any{"selected": protocol.ModelSelection{
+			Provider: p.Provider, Model: p.Model, ReasoningEffort: p.ReasoningEffort,
+		}}
+	case protocol.MLlmModels:
+		var provider string
+		_ = json.Unmarshal(payload, &provider)
+		fh.mu.Lock()
+		list := fh.discovered[provider]
+		fh.mu.Unlock()
+		return list
+	case "settings.describe":
+		fh.mu.Lock()
+		var ns []protocol.SettingNamespaceView
+		for name, raw := range fh.settings {
+			ns = append(ns, protocol.SettingNamespaceView{Ns: name, Value: raw})
+		}
+		fh.mu.Unlock()
+		return map[string]any{"writable": true, "namespaces": ns}
+	case "settings.mutate":
+		var p struct {
+			Ns  string             `json:"ns"`
+			Ops []protocol.SettingOp `json:"ops"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		fh.mu.Lock()
+		fh.lastMutate = append(fh.lastMutate, payload)
+		fh.mu.Unlock()
+		value := fh.applySettings(p.Ns, p.Ops)
+		return map[string]any{"ns": p.Ns, "value": value, "revision": 1}
 	case protocol.MWorkspaceCreate:
 		var p struct {
 			Path string `json:"path"`
@@ -188,4 +239,50 @@ func (fh *fakeHost) unary(method string, payload json.RawMessage) any {
 		}
 	}
 	return map[string]any{}
+}
+
+// lastMutatePayload returns the recorded settings.mutate envelope ("" if
+// none landed).
+func (fh *fakeHost) lastMutatePayload() string {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if len(fh.lastMutate) == 0 {
+		return ""
+	}
+	return string(fh.lastMutate[len(fh.lastMutate)-1])
+}
+
+// applySettings applies path ops to one namespace value in memory.
+func (fh *fakeHost) applySettings(ns string, ops []protocol.SettingOp) json.RawMessage {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	var doc map[string]any
+	if raw, ok := fh.settings[ns]; ok {
+		_ = json.Unmarshal(raw, &doc)
+	}
+	if doc == nil {
+		doc = map[string]any{}
+	}
+	for _, op := range ops {
+		cur := doc
+		for i, key := range op.Path {
+			if i == len(op.Path)-1 {
+				if op.Op == "unset" {
+					delete(cur, key)
+				} else {
+					cur[key] = op.Value
+				}
+				break
+			}
+			next, ok := cur[key].(map[string]any)
+			if !ok {
+				next = map[string]any{}
+				cur[key] = next
+			}
+			cur = next
+		}
+	}
+	raw, _ := json.Marshal(doc)
+	fh.settings[ns] = raw
+	return raw
 }

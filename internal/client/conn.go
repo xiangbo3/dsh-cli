@@ -266,10 +266,14 @@ func (c *Conn) Exchange(ctx context.Context, hc *http.Client) error {
 	c.exchCh = ch
 	c.mu.Unlock()
 	// The in-flight marker clears (and waiters wake) on every outcome,
-	// however the mint ends.
+	// however the mint ends. Only a marker this mint installed is
+	// cleared: a slow mint past the 2s throttle may be superseded, and
+	// wiping the successor's marker leaves later callers unblocked.
 	defer func() {
 		c.mu.Lock()
-		c.exchCh = nil
+		if c.exchCh == ch {
+			c.exchCh = nil
+		}
 		c.mu.Unlock()
 		close(ch)
 	}()
@@ -442,8 +446,11 @@ func (c *Conn) WorkspaceApply(kind string, workspace *protocol.WorkspaceView, wo
 		c.wsArchived = archived
 		return
 	}
+	// Every mutation copies into a fresh array: WorkspaceBaseline hands
+	// the current slice out by reference, so in-place edits (compacting
+	// or overwriting elements) would be visible to earlier readers.
 	if workspaceID != "" { // remove
-		out := c.wsItems[:0]
+		out := make([]protocol.WorkspaceView, 0, len(c.wsItems))
 		for _, w := range c.wsItems {
 			if w.WorkspaceId != workspaceID {
 				out = append(out, w)
@@ -454,11 +461,16 @@ func (c *Conn) WorkspaceApply(kind string, workspace *protocol.WorkspaceView, wo
 	}
 	for i, w := range c.wsItems { // upsert
 		if w.WorkspaceId == workspace.WorkspaceId {
-			c.wsItems[i] = *workspace
+			next := make([]protocol.WorkspaceView, len(c.wsItems))
+			copy(next, c.wsItems)
+			next[i] = *workspace
+			c.wsItems = next
 			return
 		}
 	}
-	c.wsItems = append(c.wsItems, *workspace)
+	next := make([]protocol.WorkspaceView, len(c.wsItems), len(c.wsItems)+1)
+	copy(next, c.wsItems)
+	c.wsItems = append(next, *workspace)
 }
 
 func (c *Conn) reorder(ids []string) {

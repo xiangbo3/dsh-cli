@@ -75,9 +75,10 @@ var newRoutes = map[string]newRoute{
 	"credentials.set":               {"credentials/set", "top"},
 	"credentials.unset":             {"credentials/unset", "top"},
 	"llm.providers":                 {"llm/listProviders", wrapNone},
-	// llm.models has no route: the upgraded host dropped listModels (its
-	// discoverModels takes a different shape) and it reaches only the
-	// untyped Call escape hatch — a call there reports "no route".
+	// llm.models has no route: the upgraded host dropped listModels. The
+	// legacy wire still reaches it (a bare provider name in, a flat list
+	// out); the new wire gets llm/discoverModels below.
+	"llm.discoverModels":            {"llm/discoverModels", "top"},
 	"goal.create":                   {"goals/create", "goal"},
 	"goal.edit":                     {"goals/edit", "goalRef"},
 	"goal.pause":                    {"goals/pause", "goalRef"},
@@ -98,6 +99,18 @@ func newArgs(method string, rawPayload []byte, rpcId string) ([]byte, error) {
 		// deployment-wide model directory (the old per-session call
 		// maps onto it; the facade ignores the session).
 		return []byte(`{"args":{}}`), nil
+	case "llm.discoverModels":
+		var p struct {
+			SettingsNs string                   `json:"settingsNs"`
+			Request    protocol.DiscoverRequest `json:"request"`
+		}
+		if err := json.Unmarshal(rawPayload, &p); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]any{"args": map[string]any{
+			"settingsNs": p.SettingsNs,
+			"request":    p.Request,
+		}})
 	case "session.history":
 		var p struct {
 			SessionId   string `json:"sessionId"`

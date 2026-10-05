@@ -80,25 +80,14 @@ func (m *Model) View() string {
 	status := m.statusBar(m.W)
 	toasts := m.toastsView(m.W)
 
-	// The frame carries two hairline rules: below the top bar and above the
-	// input deck, and it must never exceed the window height: the alt-screen
+	// The input deck (rule, input frame, status strip) is pinned to the
+	// window bottom: transient layers (toasts, queue strip, slash menu)
+	// overlay the transcript instead of entering the budget, so a toast
+	// or a queued prompt can never move the bar the user is typing in.
+	// The frame must never exceed the window height: the alt-screen
 	// renderer clips overflow from the top, so a too-tall frame eats the
-	// persistent top bar. Count every layer in the budget, and in a cramped
-	// window drop the transient layers (toasts, queue strip, slash menu) in
-	// that order — the transcript keeps at least its last row.
-	mainH := m.H - 1 - len(menuLines) - len(inputLines) - len(queue) - len(toasts) - 1 - 2
-	if mainH < 1 {
-		toasts = toasts[:0]
-		mainH = m.H - 1 - len(menuLines) - len(inputLines) - len(queue) - 1 - 2
-	}
-	if mainH < 1 {
-		queue = queue[:0]
-		mainH = m.H - 1 - len(menuLines) - len(inputLines) - 1 - 2
-	}
-	if mainH < 1 {
-		menuLines = menuLines[:0]
-		mainH = m.H - 1 - len(inputLines) - 1 - 2
-	}
+	// persistent top bar.
+	mainH := m.H - 1 - 1 - 1 - len(inputLines) - 1
 	if mainH < 1 {
 		mainH = 1 // pathological window: top bar + input deck survive
 	}
@@ -106,13 +95,13 @@ func (m *Model) View() string {
 	// transcript keeps column 0: the session list floats as a centered
 	// popup, not a column).
 	m.transX = 0
-	m.transY = 2 + len(toasts)
+	m.transY = 2
 
 	// Publish the input bar origin for mouse mapping (the bar spans the
-	// full width, drawn after the second rule, the queue and the slash
-	// menu; its row count includes the rounded frame: one border row on
-	// top and bottom, the wrapped input lines between them).
-	m.inpY = 2 + len(toasts) + mainH + 1 + len(queue) + len(menuLines)
+	// full width, pinned above the status strip; its row count includes
+	// the rounded frame: one border row on top and bottom, the wrapped
+	// input lines between them).
+	m.inpY = m.H - 1 - len(inputLines)
 	m.inpH = len(inputLines)
 
 	top := m.topBar(m.W)
@@ -122,13 +111,24 @@ func (m *Model) View() string {
 	var lines []string
 	lines = append(lines, top)
 	lines = append(lines, rule)
-	lines = append(lines, toasts...)
 	lines = append(lines, strings.Split(main, "\n")...)
 	lines = append(lines, rule)
-	lines = append(lines, queue...)
-	lines = append(lines, menuLines...)
 	lines = append(lines, inputLines...)
 	lines = append(lines, status)
+	// Transient overlays replace transcript rows (toasts over the head,
+	// queue strip + slash menu over the tail, right above the bottom
+	// rule) so the pinned deck below never moves.
+	for i, ln := range toasts {
+		if y := 2 + i; y < 2+mainH {
+			lines[y] = ln
+		}
+	}
+	over := append(append([]string(nil), queue...), menuLines...)
+	for i, ln := range over {
+		if y := 2 + mainH - len(over) + i; y >= 2 && y < 2+mainH {
+			lines[y] = ln
+		}
+	}
 	// The session window is the topmost surface: composed after the rest
 	// of the frame and pasted at the screen center, whole rows: the
 	// window's opaque cells take their columns (its interior is a solid
@@ -171,6 +171,12 @@ func (m *Model) View() string {
 	// popup's card surface into the margin (fillRowWidth).
 	for i, ln := range lines {
 		lines[i] = fillRowWidth(ln, m.W)
+	}
+	// The renderer drops an over-tall frame from the top, which would eat
+	// the top bar. The budget math above already guarantees the frame
+	// fits; this clamps the tail on a layout regression instead.
+	if m.H > 0 && len(lines) > m.H {
+		lines = lines[:m.H]
 	}
 	out := strings.Join(lines, "\n")
 	if m.bell {
@@ -1374,6 +1380,8 @@ func (m *Model) modelReadout() (styled, plain string) {
 		if snap := m.st.Get(id); snap != nil && snap.ModelSel != nil {
 			effort = snap.ModelSel.ReasoningEffort
 		}
+	} else if m.stagedModel != nil {
+		effort = m.stagedModel.ReasoningEffort
 	}
 	if name == "" {
 		return "", ""

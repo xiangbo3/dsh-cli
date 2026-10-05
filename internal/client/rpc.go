@@ -290,8 +290,12 @@ func (c *Client) peekFollow(ctx context.Context, sid string) (int64, error) {
 	if err != nil {
 		return -1, fmt.Errorf("follow snapshot: %w", err)
 	}
+	// The read loop gets a total bound (each read's 5s is per-read only;
+	// a slow trickle of frames must not hold the follow open forever).
+	lctx, lcancel := context.WithTimeout(ctx, 10*time.Second)
+	defer lcancel()
 	for {
-		rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
+		rctx, rcancel := context.WithTimeout(lctx, 5*time.Second)
 		_, data, err := conn.Read(rctx)
 		rcancel()
 		if err != nil {

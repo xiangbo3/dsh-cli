@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.0.52
+
+### Added
+
+- The model picker can fetch a provider's live model list: `f` probes
+  the provider's endpoint, models missing from the catalog open a
+  selection dialog (all pre-checked); `space` toggles a model and
+  `enter` adds the checked ones to the provider's settings.
+- The input deck (input frame + status line) is pinned to the window
+  bottom: toasts, the queue strip and the slash menu overlay the
+  transcript instead of pushing the bar around.
+
+### 新增
+
+- 模型选择器可获取服务商端点的实时模型列表：`f` 查询端点，目录之外
+  的模型弹出选择框（默认全部勾选），`space` 切换勾选，`enter` 把已
+  勾选的模型加入服务商配置。
+- 输入区（输入框 + 状态栏）固定钉在窗口底部：toast、排队条、斜杠
+  菜单改为覆盖在会话记录上，不再挤动输入区。
+
+### Fixed
+
+- The top bar's model name updates the moment a model is chosen, even
+  with no session current: the picker opens on the host's global
+  catalog and stages the pick, which the first session to become
+  current applies.
+- 选择模型后顶栏模型名立即更新，无会话时亦然：选择器可基于全局目录
+  打开，所选模型暂存，由第一个开启的会话应用。
+
+- The transcript no longer serves stale or misplaced rows after loading
+  older history (ctrl+u) or a mid-turn re-baseline: rebuilt and prepended
+  items carried render IDs that collided with cached rows, so the board
+  kept showing superseded content until a full refresh (ctrl+e).
+- Data races in the multiplexed downlink: stream IDs are now allocated and
+  stream endpoints read under the stream lock, so concurrent follows can
+  no longer collide or be routed to the wrong stream.
+- The workspace registry mirror is now copy-on-write: removing, updating,
+  or adding a workspace no longer edits the slice handed to earlier
+  readers.
+- Turn token totals can no longer go negative when a streamed usage
+  preview is not confirmed by the final message, and an empty queue
+  snapshot no longer marks an idle session as running.
+- A corrupt stored zh.json no longer degrades the whole face to English:
+  the broken file is skipped and the built-in Chinese table is used, and
+  the catalog files are written atomically so a crash cannot corrupt them.
+- Auto-start's lsof-less kill fallback now targets the host on its own
+  port, leaving dsh web on other ports alone.
+- Host-provided text that carries terminal escape sequences (e.g. pasted
+  terminal output) no longer clobbers the UI: such text is stripped before
+  it reaches the screen, so the top bar can no longer be wiped out while
+  scrolling the transcript.
+
+### 修复
+
+- 加载更早历史（ctrl+u）或回合中途重新基线后，消息流不再残留旧行或显示
+  错位内容：重建与前置的条目此前会撞上缓存行已有的渲染编号，旧内容一直
+  保留到强制刷新（ctrl+e）为止。
+- 修复多路复用下行链路的并发竞争：流编号分配与端点读取现在都在流锁保护
+  下进行，并发关注不再撞号或路由到错误的流。
+- 工作区注册表镜像改为写时复制：增删改工作区不再原地修改已交给早期
+  读者的切片。
+- 流式用量预览未获最终消息确认时，回合 token 统计不再出现负数；空队列
+  快照不再把空闲会话误标为运行中。
+- zh.json 损坏时不再整体退化为英文：跳过损坏文件、回退内置中文表；
+  语言文件改为原子写入，崩溃不会留下半截文件。
+- 自动启动在缺少 lsof 时的杀进程回退现在只针对本端口宿主，不影响其它
+  端口的 dsh web。
+- 宿主下发的文本若携带终端转义序列（如粘贴的终端输出），不再破坏界面：
+  这类文本在入屏前统一去除，滚动消息流时顶栏不再被抹掉。
+
 ## 1.0.51
 
 ### Added

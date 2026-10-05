@@ -311,8 +311,11 @@ func (m *muxStream) openStream(endpoint string, a FollowAddr) {
 }
 
 func (m *muxStream) nextID() uint32 {
+	m.mu.Lock()
 	m.idGen++
-	return m.idGen
+	id := m.idGen
+	m.mu.Unlock()
+	return id
 }
 
 // send writes one multiplex message.
@@ -339,13 +342,13 @@ func (m *muxStream) route(data []byte) {
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return
 	}
-	sub := m.subFor(msg.StreamId)
+	sub, endpoint := m.subFor(msg.StreamId)
 	switch msg.Type {
 	case "item":
 		if sub == nil || len(msg.Value) == 0 {
 			return
 		}
-		m.emit(sub, msg.Value)
+		m.emit(sub, endpoint, msg.Value)
 	case "end":
 		// A stream ended (the host closed it): drop the registration.
 		// The epoch's teardown + re-open re-baselines on reconnect.
@@ -377,15 +380,21 @@ func (m *muxStream) route(data []byte) {
 	}
 }
 
-func (m *muxStream) subFor(id string) *muxSub {
+func (m *muxStream) subFor(id string) (*muxSub, string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.byID[id]
+	sub := m.byID[id]
+	if sub == nil {
+		return nil, ""
+	}
+	// Snapshot the endpoint under the lock: cancelAddr and route("end")
+	// clear it from other goroutines, and emit dereferences it unlocked.
+	return sub, sub.endpoint
 }
 
 // emit re-emits one stream item as legacy downlink frames.
-func (m *muxStream) emit(sub *muxSub, value json.RawMessage) {
-	switch sub.endpoint {
+func (m *muxStream) emit(sub *muxSub, endpoint string, value json.RawMessage) {
+	switch endpoint {
 	case "$events":
 		m.emitEvents(value)
 	case "session/follow":

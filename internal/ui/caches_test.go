@@ -6,6 +6,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -174,5 +175,57 @@ func TestSideToggleReWrapsTranscript(t *testing.T) {
 	}
 	if f2 := m.View(); f2 != f1 {
 		t.Fatal("idle frames after the re-wrap must be stable")
+	}
+}
+
+// TestTransCachePrependIdentity pins the render identity across fold
+// merges: LoadOlder (ctrl+u) prepends an older page folded in a scratch
+// Transcript, and those items' Gens must not collide with the cached rows
+// of the tail (a per-transcript counter restarts at one). A collision
+// keeps serving the tail's own oldest rows at the top of the board until
+// a full cache reset (ctrl+e) — the "loaded history shows the wrong
+// messages" jump.
+func TestTransCachePrependIdentity(t *testing.T) {
+	m := cachesApp(t)
+	c := m.trans
+
+	evUser := func(seq int64, text string) *protocol.SessionEvent {
+		b, _ := json.Marshal(protocol.Message{Role: "user",
+			Content: []protocol.ContentBlock{{Type: "text", Text: text}}})
+		return &protocol.SessionEvent{Type: "user/message", Seq: seq, Time: seq * 1000, Data: b}
+	}
+	evAsst := func(seq int64, turn int, text string) *protocol.SessionEvent {
+		b, _ := json.Marshal(protocol.AssistantMessageEventData{Turn: turn, Step: 1,
+			Message: protocol.Message{Role: "assistant",
+				Content: []protocol.ContentBlock{{Type: "text", Text: text}}}})
+		return &protocol.SessionEvent{Type: "assistant/message", Seq: seq, Time: seq * 1000, Data: b}
+	}
+
+	// Live fold of the recent tail, rendered into the cache.
+	live := core.NewTranscript()
+	for i := 1; i <= 4; i++ {
+		live.Apply(evUser(int64(8*i+1), fmt.Sprintf("tail-%d", i)))
+		live.Apply(evAsst(int64(8*i+2), i, fmt.Sprintf("tail-reply-%d", i)))
+	}
+	if !c.apply(m, live.Items) {
+		t.Fatal("first apply must render")
+	}
+
+	// Older page: lower seqs than the live fold watermark.
+	var older []*protocol.SessionEvent
+	for i := 1; i <= 4; i++ {
+		older = append(older, evUser(int64(2*i-1), fmt.Sprintf("older-%d", i)))
+		older = append(older, evAsst(int64(2*i), i, fmt.Sprintf("older-reply-%d", i)))
+	}
+	live.Prepend(older)
+	if len(live.Items) != 16 {
+		t.Fatalf("merged items = %d, want 16", len(live.Items))
+	}
+	c.apply(m, live.Items)
+	got := strings.Join(c.lines, "\n")
+	for i := 1; i <= 4; i++ {
+		if !strings.Contains(got, fmt.Sprintf("older-reply-%d", i)) {
+			t.Fatalf("prepended row %d missing or stale: the board still serves the first rows of the tail", i)
+		}
 	}
 }

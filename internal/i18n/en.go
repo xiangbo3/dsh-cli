@@ -235,7 +235,7 @@ var en = map[string]string{
 
 	// ---- model picker
 	"model.title":        "model",
-	"model.hint":         "  ↑↓ select · ←→ effort · enter use · esc close",
+	"model.hint":         "  ↑↓ select · ←→ effort · enter use · f fetch list · esc close",
 	"model.loading":      "  loading catalog…",
 	"model.none":         "  (no models advertised)",
 	"model.current":      "  current: %s / %s%s",
@@ -244,7 +244,16 @@ var en = map[string]string{
 	"model.fail.pref":    "  ✗ ",
 	"model.efforts":      "  efforts: ",
 	"model.effort.hint":  "  ←/→ cycle effort · enter selects · esc cancels",
-	"model.select.hint":  "  enter selects · esc cancels",
+	"model.select.hint":  "  enter selects · f fetches list · esc closes",
+	"model.fetching":     "  fetching model list…",
+	"model.no.fresh":     "  the endpoint has no models beyond the catalog",
+	"model.no.settings":  "  no settings found for provider %s",
+	"model.check.first":  "  check at least one model first (space)",
+	"model.added":        "  added %d model(s) to %s",
+	"model.staged":       "model staged: %s — takes effect when a session becomes current",
+	"addmodel.title":     "add models · %s",
+	"addmodel.adding":    "  adding…",
+	"addmodel.hint":      "  %d checked · ↑↓ select · space toggle · enter add · esc close",
 	"model.default":      "(default)",
 	"model.default.head": "(default",
 

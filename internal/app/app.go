@@ -729,6 +729,26 @@ func (a *App) SelectModel(ctx context.Context, id, provider, model, effort strin
 	return a.cli.SelectModel(ctx, id, provider, model, effort)
 }
 
+// DiscoverModels asks a provider endpoint for its served models.
+func (a *App) DiscoverModels(ctx context.Context, settingsNs string, req protocol.DiscoverRequest) ([]protocol.DiscoveredModel, error) {
+	return a.cli.DiscoverModels(ctx, settingsNs, req)
+}
+
+// ConfigurableProviders lists the host's configurable providers.
+func (a *App) ConfigurableProviders(ctx context.Context) ([]protocol.ConfigurableProvider, error) {
+	return a.cli.ConfigurableProviders(ctx)
+}
+
+// SettingsDescribe reads every settings namespace (values stay raw).
+func (a *App) SettingsDescribe(ctx context.Context) (*protocol.SettingsDescription, error) {
+	return a.cli.SettingsDescribe(ctx)
+}
+
+// SettingsMutate applies path ops to one namespace.
+func (a *App) SettingsMutate(ctx context.Context, ns string, ops []protocol.SettingOp) (*protocol.SettingNamespaceView, error) {
+	return a.cli.SettingsMutate(ctx, ns, ops)
+}
+
 // SelectMode recomposes one session's agent from another preset — the
 // deployment's mode switch (standard / PTC / minimal / creator). The host
 // allows the switch only while the session is still blank; the returned

@@ -284,7 +284,13 @@ func Boot() {
 			return
 		}
 		if b, err := catalogFile(table); err == nil {
-			os.WriteFile(p, b, 0o644) // best-effort
+			// Atomic replace: a half-written catalog would fail Load's
+			// parse and degrade the face for the whole next run.
+			if tmp, err := os.CreateTemp(d, name+".tmp*"); err == nil {
+				_, _ = tmp.Write(b)
+				_ = tmp.Close()
+				_ = os.Rename(tmp.Name(), p)
+			}
 		}
 	}
 	sync("en.json", en)
@@ -333,7 +339,7 @@ func Load(lang string) (*Locale, string, error) {
 			}
 			msgs := map[string]string{}
 			if err := json.Unmarshal(b, &msgs); err != nil {
-				return nil, "", fmt.Errorf("bad catalog %s: %v", p, err)
+				continue // a broken file is skipped, the face never breaks
 			}
 			return &Locale{Lang: code, msgs: msgs}, p, nil
 		}

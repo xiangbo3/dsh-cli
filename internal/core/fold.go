@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"dsh-cli/internal/protocol"
@@ -75,9 +76,12 @@ type Item struct {
 	Note      string
 	Raw       string
 	Ignorable bool
-	// Render identity for the UI cache: Gen is unique per transcript and
-	// item (assigned at creation, immune to GC address reuse); Ver bumps
-	// on every in-place mutation so a changed item re-renders.
+	// Render identity for the UI cache: Gen is process-unique (the global
+	// stamp counter below: a re-baseline rebuild or an older-page merge
+	// creates a fresh transcript whose local counter would restart at one,
+	// and a colliding Gen would keep the cached row serving superseded
+	// content); assigned at creation, immune to GC address reuse. Ver
+	// bumps on every in-place mutation so a changed item re-renders.
 	Gen int
 	Ver int
 }
@@ -116,7 +120,6 @@ type Transcript struct {
 	streamSampled bool // the step's generation sample is on record
 	// tool-call result matching
 	openTools map[string]*ToolBlock
-	genSeq    int
 	// turn bookkeeping (exposed for store-level stats)
 	TurnStartAt  int64
 	TurnStartNum int // turn number of the turn/start that set TurnStartAt (0: unknown)
@@ -161,10 +164,17 @@ func NewTranscript() *Transcript {
 	}
 }
 
-// stamp marks it as the genSeq'th item of this transcript (render identity).
+// genCounter is process-wide render identity: one stamp, one value, never
+// reused. Items survive transcript instance swaps (LoadTail rebuilds the
+// fold, Prepend merges a scratch fold's items in), so a per-transcript
+// counter would hand fresh items the Gens of superseded rows already in
+// the render cache — the (Gen, Ver) match would then keep serving that
+// row's old lines until a full cache reset.
+var genCounter int64
+
+// stamp marks it with its render identity (Gen) and a fresh Ver epoch.
 func (t *Transcript) stamp(it *Item) *Item {
-	t.genSeq++
-	it.Gen = t.genSeq
+	it.Gen = int(atomic.AddInt64(&genCounter, 1))
 	return it
 }
 
@@ -186,7 +196,9 @@ func (t *Transcript) AddUser(m *protocol.Message, time int64, seq int64) {
 // AddPendingUser records an optimistic echo of a prompt we just sent. It is
 // replaced when the matching user/message event (source.rpcId) arrives.
 func (t *Transcript) AddPendingUser(text, rpcId string, time int64) {
-	t.Items = append(t.Items, t.stamp(&Item{Kind: KindUser, Time: time, Text: text, EchoRpcId: rpcId}))
+	// Strip like the canonical event's text: the echo placeholder is
+	// matched against it (dropPendingEchoText) and drawn to the same tty.
+	t.Items = append(t.Items, t.stamp(&Item{Kind: KindUser, Time: time, Text: textutil.StripTerminal(text), EchoRpcId: rpcId}))
 }
 
 // ReconcileEcho drops the optimistic placeholder for a sent prompt once its
@@ -308,10 +320,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 			return false, nil
 		}
 		t.attrTurn(d.Turn)
-		if !t.beginStreaming(d.Turn, d.Step) {
-			// A chunk for a different in-flight turn: attach to the live one.
-			t.beginStreaming(d.Turn, d.Step)
-		}
+		t.beginStreaming(d.Turn, d.Step)
 		t.applyChunk(d.Chunk, ev.Time)
 		t.noteSeq(ev.Seq, ev.Time)
 		return true, nil
@@ -321,7 +330,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 			return false, nil
 		}
 		t.attrTurn(d.Turn)
-		tb := &ToolBlock{Id: d.CallId, Name: textutil.StripANSI(d.Name), Args: d.Arguments, ArgsFull: d.Arguments, CallSeq: ev.Seq, CallTime: ev.Time}
+		tb := &ToolBlock{Id: d.CallId, Name: textutil.StripTerminal(d.Name), Args: textutil.StripTerminal(d.Arguments), ArgsFull: textutil.StripTerminal(d.Arguments), CallSeq: ev.Seq, CallTime: ev.Time}
 		t.ensureToolBlock(tb)
 		t.noteSeq(ev.Seq, ev.Time)
 		return true, nil
@@ -370,6 +379,8 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
 			return false, nil
 		}
+		d.Name = textutil.StripTerminal(d.Name)
+		d.Args = textutil.StripTerminal(d.Args)
 		t.Items = append(t.Items, t.stamp(&Item{Kind: KindCommand, Seq: ev.Seq, Time: ev.Time, CmdRun: &d}))
 		return true, nil
 	case "command/done":
@@ -377,6 +388,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
 			return false, nil
 		}
+		d.Text = textutil.StripTerminal(d.Text)
 		for i := len(t.Items) - 1; i >= 0; i-- {
 			if t.Items[i].Kind == KindCommand && t.Items[i].CmdRun != nil && t.Items[i].CmdDone == nil && t.Items[i].CmdRun.CommandId == d.CommandId {
 				cp := *t.Items[i]
@@ -604,7 +616,7 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 					b.Kind = "reasoning"
 				case "tool-call":
 					b.Kind = "tool"
-					b.Tool = &ToolBlock{Id: c.Block.Id, Name: textutil.StripANSI(c.Block.Name), ArgsFull: c.Block.Arguments, Args: c.Block.Arguments, CallTime: time}
+					b.Tool = &ToolBlock{Id: c.Block.Id, Name: textutil.StripTerminal(c.Block.Name), ArgsFull: textutil.StripTerminal(c.Block.Arguments), Args: textutil.StripTerminal(c.Block.Arguments), CallTime: time}
 				default:
 					b.Kind = "text"
 				}
@@ -614,10 +626,10 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 		}
 	case "text-delta":
 		b := t.ensureStreamBlock(c.Index, "text", time)
-		b.Text += c.Text
+		b.Text += textutil.StripTerminal(c.Text)
 	case "reasoning-delta":
 		b := t.ensureStreamBlock(c.Index, "reasoning", time)
-		b.Text += c.Text
+		b.Text += textutil.StripTerminal(c.Text)
 	case "tool-call-delta":
 		b := t.ensureStreamBlock(c.Index, "tool", time)
 		if b.Tool == nil {
@@ -627,10 +639,10 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 			b.Tool.Id = c.Id
 		}
 		if c.Name != "" {
-			b.Tool.Name = textutil.StripANSI(c.Name)
+			b.Tool.Name = textutil.StripTerminal(c.Name)
 		}
-		b.Tool.Args += c.ArgumentsDelta
-		b.Tool.ArgsFull += c.ArgumentsDelta
+		b.Tool.Args += textutil.StripTerminal(c.ArgumentsDelta)
+		b.Tool.ArgsFull += textutil.StripTerminal(c.ArgumentsDelta)
 	case "block-end":
 		if c.Block != nil {
 			if b, ok := t.curBlocks[c.Index]; ok {
@@ -639,7 +651,7 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 					b.Kind = "reasoning"
 				case "tool-call":
 					b.Kind = "tool"
-					b.Tool = &ToolBlock{Id: c.Block.Id, Name: textutil.StripANSI(c.Block.Name), ArgsFull: c.Block.Arguments, Args: c.Block.Arguments, CallTime: time}
+					b.Tool = &ToolBlock{Id: c.Block.Id, Name: textutil.StripTerminal(c.Block.Name), ArgsFull: textutil.StripTerminal(c.Block.Arguments), Args: textutil.StripTerminal(c.Block.Arguments), CallTime: time}
 				}
 			}
 		}
@@ -747,8 +759,12 @@ func (t *Transcript) replaceStreamed(it *Item) int {
 func (t *Transcript) buildAssistantItem(m *protocol.Message, usage *protocol.TokenUsage, turn, step int, seq, time int64) *Item {
 	it := t.stamp(&Item{Kind: KindAssistant, Seq: seq, Time: time, Usage: usage, Turn: turn, Step: step})
 	// The live preview (a usage chunk) already folded this step's usage;
-	// add only the remainder (zero when it carried the full usage).
-	addUsageDelta(&t.TurnTokens, t.streamUsage, usage)
+	// add only the remainder (zero when it carried the full usage). A
+	// canonical message without usage adds nothing — subtracting the
+	// preview would drive the turn total negative.
+	if usage != nil {
+		addUsageDelta(&t.TurnTokens, t.streamUsage, usage)
+	}
 	if usage != nil && usage.OutputTokens > 0 && !t.streamSampled {
 		t.addGenSample(time, usage.OutputTokens)
 		t.streamSampled = true
@@ -758,11 +774,11 @@ func (t *Transcript) buildAssistantItem(m *protocol.Message, usage *protocol.Tok
 	for _, b := range m.Content {
 		switch b.Type {
 		case "text":
-			it.Blocks = append(it.Blocks, ABlock{Kind: "text", Text: b.Text})
+			it.Blocks = append(it.Blocks, ABlock{Kind: "text", Text: textutil.StripTerminal(b.Text)})
 		case "reasoning":
-			it.Blocks = append(it.Blocks, ABlock{Kind: "reasoning", Text: b.Text})
+			it.Blocks = append(it.Blocks, ABlock{Kind: "reasoning", Text: textutil.StripTerminal(b.Text)})
 		case "tool-call":
-			tb := &ToolBlock{Id: b.Id, Name: textutil.StripANSI(b.Name), Args: truncateMiddle(b.Arguments, 120), ArgsFull: b.Arguments, CallSeq: seq, CallTime: time}
+			tb := &ToolBlock{Id: b.Id, Name: textutil.StripTerminal(b.Name), Args: truncateMiddle(textutil.StripTerminal(b.Arguments), 120), ArgsFull: textutil.StripTerminal(b.Arguments), CallSeq: seq, CallTime: time}
 			t.ensureToolBlock(tb)
 			ref := tb
 			if tb.Id != "" {
@@ -801,9 +817,23 @@ func addUsageDelta(tt *TurnTokens, prev, next *protocol.TokenUsage) {
 	if next != nil {
 		n = *next
 	}
-	tt.In += n.InputTokens - p.InputTokens + n.CacheReadTokens - p.CacheReadTokens
-	tt.Out += n.OutputTokens - p.OutputTokens
-	tt.Cache += n.CacheReadTokens - p.CacheReadTokens
+	dIn := n.InputTokens - p.InputTokens + n.CacheReadTokens - p.CacheReadTokens
+	dOut := n.OutputTokens - p.OutputTokens
+	dCache := n.CacheReadTokens - p.CacheReadTokens
+	// A host that reports the canonical usage below its live preview
+	// (or omits a field) must not drive the totals negative.
+	if dIn < 0 {
+		dIn = 0
+	}
+	if dOut < 0 {
+		dOut = 0
+	}
+	if dCache < 0 {
+		dCache = 0
+	}
+	tt.In += dIn
+	tt.Out += dOut
+	tt.Cache += dCache
 }
 
 // addGenSample records one assistant message's output tokens (the

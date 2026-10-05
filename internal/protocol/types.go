@@ -186,6 +186,55 @@ func (m *SessionModels) DisplayName(provider, model string) string {
 	return model
 }
 
+// DiscoveredModel is one model a provider endpoint advertises
+// (the llm/discoverModels reply; the legacy host's listModels list).
+type DiscoveredModel struct {
+	Id              string   `json:"id"`
+	Name            string   `json:"name,omitempty"`
+	ContextWindow   int      `json:"contextWindow,omitempty"`
+	MaxTokens       int      `json:"maxTokens,omitempty"`
+	InputModalities []string `json:"inputModalities,omitempty"`
+}
+
+// DiscoverRequest is the llm/discoverModels request: a draft route the
+// host interrogates (nothing here reads or writes settings).
+type DiscoverRequest struct {
+	Provider string `json:"provider,omitempty"`
+	BaseURL  string `json:"baseURL,omitempty"`
+	Api      string `json:"api,omitempty"`
+}
+
+// ConfigurableProvider is one llm/listConfigurableProviders row: a
+// provider the host can configure, with its settings location.
+type ConfigurableProvider struct {
+	Provider     string   `json:"provider"`
+	DisplayName  string   `json:"displayName,omitempty"`
+	SettingsNs   string   `json:"settingsNs"`
+	SettingsPath []string `json:"settingsPath,omitempty"`
+	Declared     bool     `json:"declared"`
+}
+
+// SettingOp is one settings path op (a settings.mutate entry).
+type SettingOp struct {
+	Op   string   `json:"op"` // "set" | "unset"
+	Path []string `json:"path"`
+	Value any      `json:"value,omitempty"`
+}
+
+// SettingNamespaceView is one settings.describe namespace entry.
+// Value stays raw: callers decode only the namespace they need.
+type SettingNamespaceView struct {
+	Ns       string          `json:"ns"`
+	Value    json.RawMessage `json:"value"`
+	Revision int64           `json:"revision"`
+}
+
+// SettingsDescription is the settings.describe value.
+type SettingsDescription struct {
+	Writable   bool                   `json:"writable"`
+	Namespaces []SettingNamespaceView `json:"namespaces"`
+}
+
 // SessionSearchItem is one session.search row.
 type SessionSearchItem struct {
 	SessionId string `json:"sessionId"`

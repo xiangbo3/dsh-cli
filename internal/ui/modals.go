@@ -906,13 +906,15 @@ type modelRow struct {
 }
 
 type modelPicker struct {
-	loading bool
-	err     string
-	models  *protocol.SessionModels
-	rows    []modelRow
-	cur     int
-	effort  int // index into row.reasoning.Efforts (-1 = default)
-	loc     *i18n.Locale
+	loading       bool
+	err           string
+	models        *protocol.SessionModels
+	rows          []modelRow
+	cur           int
+	effort        int // index into row.reasoning.Efforts (-1 = default)
+	loc           *i18n.Locale
+	fetching      bool
+	fetchNote     string // host message when a fetch came back empty/rejected
 }
 
 // newModelPicker starts on the built-in face; the open site stamps the
@@ -977,8 +979,16 @@ func (p *modelPicker) view(m *Model, w, h int) []string {
 			lines = append(lines, th.CardStyle(th.Faint()).Render(p.loc.T("model.fail.pref")+f.Name+": "+f.Message))
 		}
 	}
+	if p.fetching {
+		lines = append(lines, "")
+		lines = append(lines, th.CardStyle(th.Subtle()).Render(p.loc.T("model.fetching")))
+	}
+	if p.fetchNote != "" {
+		lines = append(lines, "")
+		lines = append(lines, th.CardStyle(th.Warn()).Render("  "+p.fetchNote))
+	}
 	lines = append(lines, "")
-	if !p.rows[p.cur].reasoningIsEmpty() {
+	if p.cur < len(p.rows) && !p.rows[p.cur].reasoningIsEmpty() {
 		lines = append(lines, th.CardStyle(th.Subtle()).Render(p.loc.T("model.efforts"))+th.CardStyle(th.Plain()).Render(p.effortsLabel()))
 		lines = append(lines, th.CardStyle(th.Faint()).Render(p.loc.T("model.effort.hint")))
 	} else {
@@ -988,6 +998,24 @@ func (p *modelPicker) view(m *Model, w, h int) []string {
 }
 
 func rangeRows(rows []modelRow) []modelRow { return rows }
+
+// freshModels keeps the discovered models the provider's catalog rows do
+// not carry yet.
+func (p *modelPicker) freshModels(provider string, models []protocol.DiscoveredModel) []protocol.DiscoveredModel {
+	have := map[string]bool{}
+	for _, r := range p.rows {
+		if r.providerID == provider {
+			have[r.modelID] = true
+		}
+	}
+	var out []protocol.DiscoveredModel
+	for _, mo := range models {
+		if !have[mo.Id] {
+			out = append(out, mo)
+		}
+	}
+	return out
+}
 
 func (p *modelPicker) effortsLabel() string {
 	r := p.rows[p.cur].reasoning
@@ -1021,7 +1049,7 @@ func (p *modelPicker) update(km tea.KeyMsg) (tea.Cmd, bool) {
 		}
 	case km.Type == tea.KeyLeft, km.Type == tea.KeyRight:
 		// No row yet (still loading): no reasoning to walk.
-		if len(p.rows) > 0 {
+		if p.cur < len(p.rows) {
 			r := p.rows[p.cur].reasoning
 			if r != nil && len(r.Efforts) > 0 {
 				if km.Type == tea.KeyRight {
@@ -1039,6 +1067,10 @@ func (p *modelPicker) update(km tea.KeyMsg) (tea.Cmd, bool) {
 			}
 		}
 	case km.Type == tea.KeyEnter:
+		return nil, true
+	case km.String() == "f":
+		// The dispatch owns the fetch; claiming the key here keeps it
+		// from being absorbed as unhandled.
 		return nil, true
 	case km.Type == tea.KeyEsc:
 		return nil, true
@@ -1065,6 +1097,8 @@ func (p *modelPicker) fill(models *protocol.SessionModels) {
 	p.loading = false
 	p.models = models
 	p.rows = nil
+	p.fetchNote = ""
+	p.fetching = false
 	for _, g := range models.Groups {
 		for _, mo := range g.Models {
 			p.rows = append(p.rows, modelRow{
@@ -1076,6 +1110,95 @@ func (p *modelPicker) fill(models *protocol.SessionModels) {
 	if p.cur >= len(p.rows) {
 		p.cur = 0
 	}
+}
+
+// addModelPicker lists the models the endpoint serves that the catalog
+// lacks; every row starts checked, enter confirms the add.
+type addModelPicker struct {
+	provider string
+	models   []protocol.DiscoveredModel
+	checked  []bool
+	cur      int
+	adding   bool
+	loc      *i18n.Locale
+}
+
+// newAddModelPicker starts with every model checked.
+func newAddModelPicker(loc *i18n.Locale, provider string, models []protocol.DiscoveredModel) *addModelPicker {
+	p := &addModelPicker{loc: loc, provider: provider, models: models, checked: make([]bool, len(models))}
+	for i := range p.checked {
+		p.checked[i] = true
+	}
+	return p
+}
+
+func (p *addModelPicker) title() string { return p.loc.T("addmodel.title", p.provider) }
+
+func (p *addModelPicker) hint() string { return p.loc.T("addmodel.hint", p.checkedCount()) }
+
+func (p *addModelPicker) checkedCount() int {
+	n := 0
+	for _, c := range p.checked {
+		if c {
+			n++
+		}
+	}
+	return n
+}
+
+// checkedModels lists the models marked for the add.
+func (p *addModelPicker) checkedModels() []protocol.DiscoveredModel {
+	var out []protocol.DiscoveredModel
+	for i, c := range p.checked {
+		if c {
+			out = append(out, p.models[i])
+		}
+	}
+	return out
+}
+
+// toggle flips the check under the cursor.
+func (p *addModelPicker) toggle() {
+	if p.cur < len(p.checked) {
+		p.checked[p.cur] = !p.checked[p.cur]
+	}
+}
+
+// update claims the window's keys; the model's dispatch acts on them.
+func (p *addModelPicker) update(km tea.KeyMsg) (tea.Cmd, bool) {
+	switch {
+	case km.Type == tea.KeyUp, km.Type == tea.KeyDown, km.Type == tea.KeySpace,
+		km.Type == tea.KeyEnter, km.Type == tea.KeyEsc:
+		return nil, true
+	}
+	return nil, false
+}
+
+func (p *addModelPicker) view(m *Model, w, h int) []string {
+	th := m.th
+	var lines []string
+	for i, mo := range p.models {
+		cursor := th.Card().Render("    ")
+		if i == p.cur {
+			cursor = th.CardStyle(th.Accent()).Render("  " + th.Glyph.Caret + " ")
+		}
+		box := " "
+		if p.checked[i] {
+			box = "x"
+		}
+		name := mo.Name
+		if name == "" {
+			name = mo.Id
+		}
+		lines = append(lines, cursor+th.CardStyle(th.Plain()).Render("  ["+box+"] "+name))
+	}
+	lines = append(lines, "")
+	if p.adding {
+		lines = append(lines, th.CardStyle(th.Subtle()).Render(p.loc.T("addmodel.adding")))
+	} else {
+		lines = append(lines, th.CardStyle(th.Faint()).Render(p.loc.T("addmodel.hint", p.checkedCount())))
+	}
+	return lines
 }
 
 // ---- rename ---------------------------------------------------------------------
