@@ -164,10 +164,10 @@ func newForkTestServer(t *testing.T) *forkTestServer {
 	return fs
 }
 
-// TestForkKeyBindsAtView pins the f key: with the input empty it forks the
-// active session (tail pinned: atSeq 0) and switches focus to the child via
-// the usual create path; an f typed into a non-empty input only edits the
-// prompt.
+// TestForkKeyBindsAtView pins the ctrl+f chord: with the input empty it
+// forks the active session (tail pinned: atSeq 0) and switches focus to the
+// child via the usual create path; a plain f typed into the prompt only
+// edits it (the old bare-f chord is gone — text input is untouched).
 func TestForkKeyBindsAtView(t *testing.T) {
 	fs := newForkTestServer(t)
 	a := app.New(fs.srv.URL)
@@ -180,9 +180,9 @@ func TestForkKeyBindsAtView(t *testing.T) {
 	m.st.SetActive("s1")
 	m.View() // render once: pane measured, cache in sync with the store
 
-	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
 	if cmd == nil {
-		t.Fatal("f with empty input must return the fork cmd")
+		t.Fatal("ctrl+f with empty input must return the fork cmd")
 	}
 	msg := cmd()
 	cm, ok := msg.(createMsg)
@@ -200,8 +200,8 @@ func TestForkKeyBindsAtView(t *testing.T) {
 		t.Fatalf("active = %q, want the forked child", m.st.Active())
 	}
 
-	// A typed f lands in the input, not on the fork: once the prompt
-	// holds text the chord gives way to the editor.
+	// A typed f lands in the input, not on the fork: the bare letter is
+	// just a typing key now.
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
 	if got := m.inp.value(); got != "xf" {

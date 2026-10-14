@@ -6,6 +6,8 @@ package ui
 import (
 	"os"
 	"testing"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // TestMain redirects the app's data directory to a throwaway dir and
@@ -19,5 +21,10 @@ func TestMain(m *testing.M) {
 		os.Setenv("DSH_CLI_HOME", d)
 	}
 	os.Setenv("DSH_CLI_NO_BOOT_CACHE", "1")
+	// The layout tests' width invariants assume ambiguous-width runes
+	// (─ … ▓) take one cell; runewidth follows the locale, so pin that
+	// reading and keep the suite green under a CJK LC_CTYPE too.
+	runewidth.DefaultCondition.EastAsianWidth = false
+	runewidth.DefaultCondition.StrictEmojiNeutral = true
 	os.Exit(m.Run())
 }

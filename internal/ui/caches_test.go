@@ -101,7 +101,7 @@ func TestTransCacheStreamingThrottle(t *testing.T) {
 func TestIdleFrameServesCache(t *testing.T) {
 	m := scrollModel(t, 20)
 	f1 := m.View()
-	if f2 := m.View(); f2 != f1 {
+	if f2 := m.View(); stripRepaintMarker(f2) != stripRepaintMarker(f1) {
 		t.Fatal("idle frames must be stable (no re-sync churning)")
 	}
 
@@ -110,7 +110,7 @@ func TestIdleFrameServesCache(t *testing.T) {
 	if !strings.Contains(f3, "line-999") {
 		t.Fatal("store mutation must reach the next frame through the rev gate")
 	}
-	if f4 := m.View(); f4 != f3 {
+	if f4 := m.View(); stripRepaintMarker(f4) != stripRepaintMarker(f3) {
 		t.Fatal("idle frames after the mutation must be stable")
 	}
 }

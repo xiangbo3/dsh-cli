@@ -107,6 +107,9 @@ func Load() Config {
 	if json.Unmarshal(raw, &c) != nil {
 		return Config{}
 	}
+	// The file carries credentials (token, cookie): owner-only, even
+	// when an older version left it world-readable.
+	_ = os.Chmod(p, 0o600)
 	// Pre-split price files (one tokenPrice for everything): carry it
 	// over to the input price and drop the legacy key.
 	if c.TokenPrice > 0 {
@@ -159,7 +162,8 @@ func Save(c Config) error {
 		return err
 	}
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	// 0600: the file holds the launch token and the session cookie.
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, p); err != nil {

@@ -150,7 +150,8 @@ func TestMok2Key(t *testing.T) {
 		{"\x1b[27;5;56~", tea.KeyMsg{Type: tea.KeyBackspace}, true}, // ctrl+8
 		{"\x1b[27;5;57~", tea.KeyMsg{Type: tea.KeyTab}, true},       // ctrl+9
 		{"\x1b[27;5;48~", tea.KeyMsg{Type: tea.KeyCtrlAt}, true},    // ctrl+0
-		{"\x1b[27;5;49~", tea.KeyMsg{Type: tea.KeyCtrlA}, true},     // ctrl+1
+		{"\x1b[27;5;49~", tea.KeyMsg{Type: keyCtrlDigit1}, true},    // ctrl+1: sentinel, not ctrl+a
+		{"\x1b[27;5;53~", tea.KeyMsg{Type: keyCtrlDigit5}, true},    // ctrl+5: sentinel, not ctrl+e
 		{"\x1b[27;3;49~", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}, Alt: true}, true},
 		{"\x1b[27;2;13~", tea.KeyMsg{}, false},    // shift+enter: mok2ShiftEnter's
 		{"\x1b[27;5;65329~", tea.KeyMsg{}, false}, // ctrl+left keysym: swallow

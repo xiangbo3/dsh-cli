@@ -79,6 +79,11 @@ type muxStream struct {
 	byID    map[string]*muxSub // streamId → subscription
 	byAddr  map[string]string  // follow key → streamId (follows only)
 	follows []FollowAddr
+
+	// attempts binds a live model attempt (assistant-stream frames) to
+	// its (turn, step) so chunk frames can be re-emitted as legacy
+	// assistant/chunk events. Guarded by mu.
+	attempts map[string][2]int
 }
 
 type muxSub struct {
@@ -137,10 +142,11 @@ func (s *Stream) muxLoop(ctx context.Context) {
 		backoff = 0
 		conn.SetReadLimit(4 << 20)
 		m := &muxStream{
-			s:      s,
-			conn:   conn,
-			byID:   map[string]*muxSub{},
-			byAddr: map[string]string{},
+			s:        s,
+			conn:     conn,
+			byID:     map[string]*muxSub{},
+			byAddr:   map[string]string{},
+			attempts: map[string][2]int{},
 		}
 		s.followMu.Lock()
 		s.mux = m
@@ -597,6 +603,14 @@ func (m *muxStream) emitFollow(addr FollowAddr, value json.RawMessage) {
 			AsOfSeq int64                      `json:"asOfSeq"`
 			Values  map[string]json.RawMessage `json:"values"`
 		} `json:"projections"`
+		AssistantStream *struct {
+			ActiveAttempt *struct {
+				AttemptId string            `json:"attemptId"`
+				Turn      int               `json:"turn"`
+				Step      int               `json:"step"`
+				Stream    []json.RawMessage `json:"stream"`
+			} `json:"activeAttempt"`
+		} `json:"assistantStream"`
 		Event protocol.SessionEvent `json:"event"`
 	}
 	if err := json.Unmarshal(value, &v); err != nil {
@@ -629,9 +643,180 @@ func (m *muxStream) emitFollow(addr FollowAddr, value json.RawMessage) {
 				m.emitProjection(sid, key, v.Projections.AsOfSeq, val)
 			}
 		}
+		if v.AssistantStream != nil && v.AssistantStream.ActiveAttempt != nil {
+			// A model call was in flight when the follow opened: replay
+			// its recorded chunks so the transcript shows the partial
+			// answer (the live frames continue from the next index).
+			// The baseline carries the compact record form, expanded
+			// here the way the host expands it for history replay.
+			at := v.AssistantStream.ActiveAttempt
+			m.mu.Lock()
+			m.attempts[at.AttemptId] = [2]int{at.Turn, at.Step}
+			m.mu.Unlock()
+			for _, tc := range expandStreamRecords(at.Stream) {
+				m.emitChunkEvent(sid, at.Turn, at.Step, tc.time, tc.raw)
+			}
+		}
 	case "event":
 		m.handleFollowEvent(sid, v.Event)
+	case "assistant-stream":
+		m.emitAssistantStream(sid, value)
 	}
+}
+
+// emitAssistantStream re-emits the live model stream as the legacy
+// assistant/chunk events the fold already understands: a start frame
+// binds the attempt to its (turn, step), a chunk frame carries one
+// StreamChunk, and an end frame closes the attempt — an abandoned one
+// (retry, stream error) also drops the partial row the chunks built,
+// while a committed one is superseded by the assistant/message event.
+func (m *muxStream) emitAssistantStream(sid string, value json.RawMessage) {
+	var v struct {
+		Frame struct {
+			Type      string          `json:"type"`
+			AttemptId string          `json:"attemptId"`
+			Turn      int             `json:"turn"`
+			Step      int             `json:"step"`
+			Time      int64           `json:"time"`
+			Chunk     json.RawMessage `json:"chunk"`
+			Outcome   *struct {
+				Kind string `json:"kind"`
+			} `json:"outcome"`
+		} `json:"frame"`
+	}
+	if json.Unmarshal(value, &v) != nil {
+		return
+	}
+	f := v.Frame
+	switch f.Type {
+	case "start":
+		m.mu.Lock()
+		if len(m.attempts) > 128 { // a lost end frame must not leak the map
+			m.attempts = map[string][2]int{}
+		}
+		m.attempts[f.AttemptId] = [2]int{f.Turn, f.Step}
+		m.mu.Unlock()
+	case "chunk":
+		m.mu.Lock()
+		ts, ok := m.attempts[f.AttemptId]
+		m.mu.Unlock()
+		if !ok {
+			return
+		}
+		m.emitChunkEvent(sid, ts[0], ts[1], f.Time, f.Chunk)
+	case "end":
+		m.mu.Lock()
+		delete(m.attempts, f.AttemptId)
+		m.mu.Unlock()
+		if f.Outcome != nil && f.Outcome.Kind == "abandoned" {
+			m.emitFrame(DownlinkFrame{
+				Kind: protocol.FMuxEvent,
+				Payload: mustJSON(protocol.MuxSessionEvent{
+					Type:      protocol.FMuxEvent,
+					SessionId: sid,
+					Event: protocol.SessionEvent{Type: "assistant/stream-end", Time: time.Now().UnixMilli(),
+						Data: mustJSON(map[string]any{"outcome": "abandoned"})},
+				}),
+			})
+		}
+	}
+}
+
+// emitChunkEvent re-emits one StreamChunk as a synthetic assistant/chunk
+// event (seq 0: the fold accepts synthetic events below the watermark).
+func (m *muxStream) emitChunkEvent(sid string, turn, step int, when int64, chunk json.RawMessage) {
+	if len(chunk) == 0 {
+		return
+	}
+	if when == 0 {
+		when = time.Now().UnixMilli()
+	}
+	data, err := json.Marshal(map[string]any{"turn": turn, "step": step, "chunk": chunk})
+	if err != nil {
+		return
+	}
+	m.emitFrame(DownlinkFrame{
+		Kind: protocol.FMuxEvent,
+		Payload: mustJSON(protocol.MuxSessionEvent{
+			Type:      protocol.FMuxEvent,
+			SessionId: sid,
+			Event:     protocol.SessionEvent{Type: "assistant/chunk", Time: when, Data: data},
+		}),
+	})
+}
+
+type timedChunk struct {
+	time int64
+	raw  json.RawMessage
+}
+
+// expandStreamRecords expands the compact AssistantStreamRecord form
+// (text-chunks / reasoning-chunks / tool-call-chunks / chunk) into the
+// exact timed StreamChunk sequence, mirroring the host's
+// expandAssistantStream so a reconnecting follow replays the same
+// partial the live stream painted.
+func expandStreamRecords(records []json.RawMessage) []timedChunk {
+	var out []timedChunk
+	for _, rec := range records {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(rec, &head) != nil {
+			continue
+		}
+		switch head.Type {
+		case "chunk":
+			var v struct {
+				Time  int64           `json:"time"`
+				Chunk json.RawMessage `json:"chunk"`
+			}
+			if json.Unmarshal(rec, &v) == nil && len(v.Chunk) > 0 {
+				out = append(out, timedChunk{v.Time, v.Chunk})
+			}
+		case "text-chunks", "reasoning-chunks", "tool-call-chunks":
+			var v struct {
+				Index int      `json:"index"`
+				Time0 int64    `json:"time0"`
+				Dt    []int64  `json:"dt"`
+				Texts []string `json:"texts"`
+				Args  []string `json:"args"`
+				Id    string   `json:"id"`
+				Name  *string  `json:"name"`
+			}
+			if json.Unmarshal(rec, &v) != nil {
+				continue
+			}
+			members := v.Texts
+			if head.Type == "tool-call-chunks" {
+				members = v.Args
+			}
+			t := v.Time0
+			for i, mem := range members {
+				if i > 0 && i-1 < len(v.Dt) {
+					t += v.Dt[i-1]
+				}
+				var chunk any
+				switch head.Type {
+				case "text-chunks":
+					chunk = map[string]any{"type": "text-delta", "index": v.Index, "text": mem}
+				case "reasoning-chunks":
+					chunk = map[string]any{"type": "reasoning-delta", "index": v.Index, "text": mem}
+				default:
+					tc := map[string]any{"type": "tool-call-delta", "index": v.Index, "id": v.Id, "argumentsDelta": mem}
+					if v.Name != nil {
+						tc["name"] = *v.Name
+					}
+					chunk = tc
+				}
+				raw, err := json.Marshal(chunk)
+				if err != nil {
+					continue
+				}
+				out = append(out, timedChunk{t, raw})
+			}
+		}
+	}
+	return out
 }
 
 // handleFollowEvent re-emits one session-log event and runs the
@@ -848,13 +1033,23 @@ func (m *muxStream) emitFrame(f DownlinkFrame) {
 	select {
 	case m.s.frames <- f:
 		m.s.consec.Store(0)
-	case <-time.After(2 * time.Second):
-		m.s.dropped.Add(1)
-		if m.s.consec.Add(1) >= dropWatch {
+	default:
+		// Slow consumer: give it 2s before dropping (the drop-watch
+		// re-baselines). The fast path no longer pays a time.After
+		// timer per frame — only a genuinely blocked send does.
+		t := time.NewTimer(2 * time.Second)
+		select {
+		case m.s.frames <- f:
+			t.Stop()
 			m.s.consec.Store(0)
-			select {
-			case m.s.drops <- struct{}{}:
-			default:
+		case <-t.C:
+			m.s.dropped.Add(1)
+			if m.s.consec.Add(1) >= dropWatch {
+				m.s.consec.Store(0)
+				select {
+				case m.s.drops <- struct{}{}:
+				default:
+				}
 			}
 		}
 	}

@@ -49,13 +49,17 @@ func TestSystemPaletteDark(t *testing.T) {
 	if th.CBarBG != "" {
 		t.Fatalf("bar surface %s should be transparent", th.CBarBG)
 	}
-	// Card surface is the terminal's own background: the popup is a
-	// solid slab in the conversation's color.
-	if th.CCardBG != parseHex(t, "#0d1117").Hex() {
-		t.Fatalf("card surface %s should be the terminal background #0d1117", th.CCardBG)
+	lum := func(c string) float64 { _, _, l := parseHex(t, c).Hsl(); return l }
+	// The card is a raised panel a step above the page and its hairline a
+	// step further out: a popup wearing the conversation's own color is a
+	// popup nobody notices.
+	if d := lum(th.CCardBG) - lum("#0d1117"); d < 0.05 {
+		t.Fatalf("card surface %s sits on the page color (lightness step %.3f): the popup goes unnoticed", th.CCardBG, d)
+	}
+	if !(lum(th.CCardBG) < lum(th.CCardEdge) && lum(th.CCardEdge) < lum(th.CDim)) {
+		t.Fatalf("card edge %s outside the card %s and the dim text %s", th.CCardEdge, th.CCardBG, th.CDim)
 	}
 	// The raised-surface hierarchy on the ramp must stay ordered.
-	lum := func(c string) float64 { _, _, l := parseHex(t, c).Hsl(); return l }
 	if !(lum(th.CModalBG) < lum(th.CBorder) &&
 		lum(th.CBorder) < lum(th.CFaint) && lum(th.CFaint) < lum(th.CDim) && lum(th.CDim) < lum(th.CFG)) {
 		t.Fatalf("ramp order broken: modal=%.3f border=%.3f faint=%.3f dim=%.3f cfg=%.3f",
@@ -90,15 +94,46 @@ func TestSystemPaletteLight(t *testing.T) {
 	if th.CBarBG != "" {
 		t.Fatalf("bar surface %s should be transparent", th.CBarBG)
 	}
-	// Card surface is the terminal's own background: the popup is a
-	// solid slab in the conversation's color.
-	if th.CCardBG != parseHex(t, "#eef2f8").Hex() {
-		t.Fatalf("card surface %s should be the terminal background #eef2f8", th.CCardBG)
+	lum := func(c string) float64 { _, _, l := parseHex(t, c).Hsl(); return l }
+	// On paper the popup steps the other way: a deeper panel with a
+	// darker edge, still a clear step off the page.
+	if d := lum("#eef2f8") - lum(th.CCardBG); d < 0.05 {
+		t.Fatalf("card surface %s sits on the page color (lightness step %.3f): the popup goes unnoticed", th.CCardBG, d)
+	}
+	if !(lum(th.CCardEdge) < lum(th.CCardBG) && lum(th.CCardEdge) > lum(th.CDim)) {
+		t.Fatalf("card edge %s out of order on the paper ramp (card %s, dim text %s)", th.CCardEdge, th.CCardBG, th.CDim)
 	}
 	// Light theme: body text is the terminal fg, dim is between it and bg.
-	lum := func(c string) float64 { _, _, l := parseHex(t, c).Hsl(); return l }
 	if !(lum(th.CDim) > lum(th.CFG) && lum(th.CDim) < lum("#eef2f8")) {
 		t.Fatalf("dim %s outside (cfg %s, bg) bounds", th.CDim, th.CFG)
+	}
+}
+
+// TestCodeSlabSinksBelowPage pins the run_code slab as a sunken surface: a
+// shade under the page on every reported theme, and under the fixed
+// palette's own graphite/paper surfaces. A page already at black cannot
+// sink — there the slab lifts a hair instead, so the region keeps its fence.
+func TestCodeSlabSinksBelowPage(t *testing.T) {
+	lum := func(c string) float64 { _, _, l := parseHex(t, c).Hsl(); return l }
+	for _, page := range []string{"#0d1117", "#1e1e1e", "#2b2b2b", "#eef2f8"} {
+		th := sysTheme(t, page, "#c9d1d9")
+		if d := lum(page) - lum(th.CCodeBG); d < 0.02 {
+			t.Errorf("slab %s on page %s: lightness step %.3f, want a shade darker", th.CCodeBG, page, d)
+		}
+	}
+	if l := lum(sysTheme(t, "#000000", "#d0d0d0").CCodeBG); l <= 0 {
+		t.Error("a black page left the slab without a step")
+	}
+	fixed := &Theme{Profile: termenv.TrueColor}
+	fixed.setPalette()
+	if !(lum(fixed.CCodeBG) < lum(fixed.CModalBG) && lum(fixed.CCodeBG) < lum(fixed.CCardBG)) {
+		t.Errorf("dark slab %s not under the graphite surfaces (modal %s, card %s)",
+			fixed.CCodeBG, fixed.CModalBG, fixed.CCardBG)
+	}
+	fixed.LightBgn = true
+	fixed.setPalette()
+	if lum(fixed.CCodeBG) >= lum(fixed.CModalBG) {
+		t.Errorf("light slab %s not under the paper %s", fixed.CCodeBG, fixed.CModalBG)
 	}
 }
 

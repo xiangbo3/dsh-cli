@@ -82,7 +82,11 @@ func New(base string) *Client {
 		token:    os.Getenv("DSH_TOKEN"),
 		insecure: insecure,
 		http: &http.Client{
-			Timeout:   60 * time.Second,
+			// Safety net only: every call carries its own ctx deadline
+			// (UI calls 5–30s, the oneoff its 10m run budget — the old
+			// 60s cap cut a long oneoff run off mid-stream). The global
+			// just bounds a call whose context leaked.
+			Timeout:   10 * time.Minute,
 			Transport: transport,
 			// A redirected RPC POST replays its JSON body (the prompt)
 			// to the redirect target: treat any redirect as the final

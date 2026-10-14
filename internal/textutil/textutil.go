@@ -13,7 +13,18 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/mattn/go-runewidth"
 )
+
+func init() {
+	// The app-wide cell model must match what terminals render: go-runewidth
+	// flips ambiguous-width runes (─ │ · …) to 2 under CJK locales, but
+	// terminals render them 1-wide regardless of locale. Budgets computed
+	// against the locale model (popup splices, frame pads) then cut the
+	// border rows in half on screen.
+	runewidth.DefaultCondition.EastAsianWidth = false
+}
 
 // Truncate returns s clipped to at most n bytes; if the cut would split a
 // rune, it backs off to the previous boundary and appends the cutter

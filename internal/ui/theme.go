@@ -56,14 +56,30 @@ type Theme struct {
 	// CBarBG is the input-bar surface. The built-in palettes leave it
 	// empty: the bar (frame, prompt, text and padding alike) is
 	// transparent and rides the terminal's own background.
-	// CCardBG is the popup/session-window surface: the conversation's own
-	// background (SGR 49 in the built-in palettes, the reported color in
-	// the system one), so the box is a solid slab in the main window's
-	// color with nothing showing through.
-	CBarBG   string
-	CModalBG string
-	CCardBG  string
-	CSysFG   string
+	// CCardBG is the popup/session-window surface: a raised panel, one
+	// step off the page (above it on a dark theme, below it on a light
+	// one) so the box stands out from the conversation behind it, and
+	// still opaque — nothing of the screen shows through. CCardEdge is
+	// the popup frame's hairline, a step further off the page than the
+	// panel it outlines.
+	CBarBG    string
+	CModalBG  string
+	CCardBG   string
+	CCardEdge string
+	// CCodeBG is the code-region surface: a slab sunk into the page under
+	// run_code cards — a shade darker than the window background — so a
+	// stretch of executed code is visible at a glance without the weight
+	// of a popup panel. Empty (NoColor) leaves the region on the page.
+	CCodeBG string
+	CSysFG  string
+
+	// Named-style cache (see styleSet): styleGen bumps on every palette
+	// rebuild; the key folds in the render profile so a post-construction
+	// profile override (tests) rebuilds too.
+	styleGen  uint64
+	cachedKey uint64
+	styles    styleSet
+	stylesOk  bool
 
 	// glyphs
 	Glyph struct {
@@ -305,6 +321,8 @@ func (t *Theme) setPalette() {
 		t.CUser, t.CCode = "default", "253"
 		t.CBorder, t.CBarBG, t.CModalBG, t.CCardBG, t.CSysFG =
 			"240", "", "", "default", "246"
+		t.CCardEdge = "240"
+		t.CCodeBG = ""
 		return
 	}
 	if t.LightBgn {
@@ -314,9 +332,12 @@ func (t *Theme) setPalette() {
 		t.CUser, t.CCode = "#C24E14", "#595345"
 		t.CBorder, t.CModalBG, t.CSysFG =
 			"#D8D1C2", "#FAF6EC", "#7C766A"
-		// Card surface is the terminal's own background (SGR 49): the
-		// popup is a solid slab in the conversation's color.
-		t.CCardBG = "default"
+		// The popup is a deeper biscuit panel with a burnt edge: a step
+		// off the paper, so it reads as a window over the conversation.
+		t.CCardBG, t.CCardEdge = "#F0E9D9", "#C6BCA6"
+		// The code slab sinks into the paper: a shade deeper than the page,
+		// enough to fence a run without framing it.
+		t.CCodeBG = "#F2ECDE"
 		return
 	}
 	// Warm graphite with the Braun orange accent.
@@ -325,9 +346,13 @@ func (t *Theme) setPalette() {
 	t.CUser, t.CCode = "#FF5900", "#8F8D86"
 	t.CBorder, t.CModalBG, t.CSysFG =
 		"#3A362F", "#211F1B", "#918B7E"
-	// Card surface is the terminal's own background (SGR 49): the
-	// popup is a solid slab in the conversation's color.
-	t.CCardBG = "default"
+	// The popup is a raised graphite panel with a lit edge: a step above
+	// the page, so it reads as a window over the conversation.
+	t.CCardBG, t.CCardEdge = "#2E2A23", "#514A3E"
+	// The code slab sinks below the page: a deep graphite, a shade under a
+	// dark window background — a fence for a run of code, quieter than a
+	// popup so the page stays the page.
+	t.CCodeBG = "#100E0C"
 }
 
 // applySystem re-derives the palette from a fresh background/foreground
@@ -351,6 +376,7 @@ func (t *Theme) applySystem(bg, fg termenv.Color) bool {
 		}
 	}
 	t.setSystemPalette(bg, fg)
+	t.styleGen++ // move the style-cache key
 	return true
 }
 
@@ -396,6 +422,43 @@ func (t *Theme) setSystemPalette(bg, fg termenv.Color) {
 		return colorful.Hsl(h, bs+(fs-bs)*w, byl+(fyl-byl)*w).Hex()
 	}
 
+	// panel is a popup surface: the page's own hue and saturation with its
+	// lightness stepped w of the way toward the text, floored so a flat
+	// theme still gets a panel that reads and capped so a high-contrast
+	// one gets no garish slab. The hue stays the page's on purpose: a
+	// surface the size of a dialog that interpolates toward the text color
+	// (as the ramp above does) tints the whole box.
+	panel := func(w, limit float64) string {
+		h, s, l := t.sysBG.Hsl()
+		_, _, fl := t.sysFG.Hsl()
+		d := (fl - l) * w
+		if d > 0 {
+			d = math.Max(d, 0.08)
+		} else {
+			d = math.Min(d, -0.08)
+		}
+		d = math.Max(-limit, math.Min(limit, d))
+		return colorful.Hsl(h, s, math.Max(0, math.Min(1, l+d))).Hex()
+	}
+
+	// sink is a sunken surface: the page's own hue and saturation with its
+	// lightness stepped w of the way down toward black. Floored so a dark
+	// page still gets a step that reads, capped so a light one does not
+	// open into a hole.
+	sink := func(w, limit float64) string {
+		h, s, l := t.sysBG.Hsl()
+		if l < 0.03 {
+			// A page already at black cannot sink: raise a hair instead,
+			// or the code region loses its fence altogether.
+			return colorful.Hsl(h, s, l+0.04).Hex()
+		}
+		d := math.Max(-l*w, -limit)
+		if d > -0.05 {
+			d = -math.Min(l, 0.05)
+		}
+		return colorful.Hsl(h, s, math.Max(0, l+d)).Hex()
+	}
+
 	// tinted keeps the hue of a built-in reference color and pins its
 	// saturation and lightness for the detected surface.
 	tinted := func(ref string, s, l float64) string {
@@ -416,9 +479,15 @@ func (t *Theme) setSystemPalette(bg, fg termenv.Color) {
 	t.CSysFG = ramp(0.54)
 	t.CBorder, t.CModalBG =
 		ramp(0.21), ramp(0.08)
-	// Card surface is the terminal's reported background: the popup is a
-	// solid slab in the conversation's color.
-	t.CCardBG = b.Hex()
+	// The popups are raised panels: the page's own hue and saturation with
+	// its lightness stepped toward the text (up on a dark theme, down on a
+	// light one), the frame's hairline a step further out — the box must
+	// read as a window laid over the conversation, not as a hole in it.
+	t.CCardBG, t.CCardEdge = panel(0.18, 0.14), panel(0.40, 0.28)
+	// The code slab sinks instead of rising: the page stepped down toward
+	// black, so a code region reads as a shallow recess in the page rather
+	// than a box laid over it.
+	t.CCodeBG = sink(0.45, 0.07)
 	// The input bar stays transparent on the system surface too: no
 	// painted plate, the text rides the terminal's own background.
 	t.CBarBG = ""
@@ -483,10 +552,163 @@ func (t *Theme) Glyphs() {
 // Style shortcuts.
 type Style = lipgloss.Style
 
+// styleSet is the pre-built named styles: a lipgloss Style is a
+// value-type builder, and the hot path (dozens of .Render calls per
+// frame) must not pay a NewStyle allocation per call.
+type styleSet struct {
+	plain, subtle, faint, accent, ok, warn, err, info    Style
+	user, code, sel, border, rule, label, system         Style
+	bar, barAccent, barCursor, barSel, barBG             Style
+	barBGSeq                                             string
+	plate, platePlain, plateSubtle, plateFaint           Style
+	plateAccent, plateOk, plateWarn, plateErr, plateInfo Style
+	plateSystem, plateRule, plateCursor, plateSel        Style
+	card, cardEdge, cardCursor, cardSel, sessBand        Style
+	cardState                                            sgrState
+	codeBG                                               Style
+	codeState                                            sgrState
+	sweepDim, sweepMid, sweepHot                         Style
+}
+
 // S wraps a style builder with theme colors pre-applied.
 func (t *Theme) S() Style { return lipgloss.NewStyle() }
 
 func (t *Theme) fg(c string) Style { return lipgloss.NewStyle().Foreground(t.color(c)) }
+
+// styleKey moves when the palette moves (a styleGen bump) or the render
+// profile changes (tests override it post-construction).
+func (t *Theme) styleKey() uint64 {
+	k := t.styleGen * 1315423911
+	k ^= uint64(t.Profile) * 2654435761
+	if t.NoColor {
+		k ^= 0x9e3779b97f4a7c15
+	}
+	return k
+}
+
+// styled returns the pre-built style set, rebuilding it only when the
+// palette or the render profile moved.
+func (t *Theme) styled() *styleSet {
+	if !t.stylesOk || t.cachedKey != t.styleKey() {
+		t.styles = t.buildStyles()
+		t.cachedKey = t.styleKey()
+		t.stylesOk = true
+	}
+	return &t.styles
+}
+
+// buildStyles pre-builds every named style (see styleSet).
+func (t *Theme) buildStyles() styleSet {
+	var s styleSet
+	s.plain = t.fg(t.CFG)
+	s.subtle = t.fg(t.CDim)
+	s.faint = t.fg(t.CFaint)
+	s.accent = t.fg(t.CAccent)
+	s.ok = t.fg(t.COK)
+	s.warn = t.fg(t.CWarn)
+	s.err = t.fg(t.CErr)
+	s.info = t.fg(t.CInfo)
+	s.user = t.fg(t.CUser)
+	s.code = t.fg(t.CCode)
+	s.border = t.fg(t.CBorder)
+	s.rule = t.fg(t.CBorder)
+	edge := t.CCardEdge
+	if edge == "" {
+		edge = t.CBorder
+	}
+	s.cardEdge = t.fg(edge)
+	s.label = t.fg(t.CDim)
+	s.system = t.fg(t.CSysFG)
+	if t.NoColor || t.Profile == termenv.ANSI {
+		s.sel = lipgloss.NewStyle().Reverse(true)
+	} else {
+		s.sel = lipgloss.NewStyle().Background(t.color(t.CDim))
+	}
+	s.bar = t.barBase(t.CFG)
+	s.barAccent = t.barBase(t.CAccent)
+	s.barCursor = s.barAccent.Underline(true)
+	s.barSel = s.bar.Underline(true)
+	if t.CBarBG == "" {
+		s.barBG = lipgloss.NewStyle()
+	} else {
+		s.barBG = lipgloss.NewStyle().Background(lipgloss.Color(t.CBarBG))
+		raw := s.barBG.Render("x")
+		if i := strings.IndexByte(raw, 'x'); i > 0 {
+			s.barBGSeq = raw[:i]
+		}
+	}
+	if t.CModalBG == "" {
+		s.plate = lipgloss.NewStyle()
+	} else {
+		s.plate = lipgloss.NewStyle().Background(lipgloss.Color(t.CModalBG))
+	}
+	s.platePlain = t.pfg(t.CFG)
+	s.plateSubtle = t.pfg(t.CDim)
+	s.plateFaint = t.pfg(t.CFaint)
+	s.plateAccent = t.pfg(t.CAccent)
+	s.plateOk = t.pfg(t.COK)
+	s.plateWarn = t.pfg(t.CWarn)
+	s.plateErr = t.pfg(t.CErr)
+	s.plateInfo = t.pfg(t.CInfo)
+	s.plateSystem = t.pfg(t.CSysFG)
+	s.plateRule = t.pfg(t.CBorder)
+	if st := lipgloss.NewStyle().Background(t.color(t.CFG)); t.CModalBG != "" {
+		st = st.Foreground(lipgloss.Color(t.CModalBG))
+		s.plateCursor = st
+	}
+	if t.NoColor || t.Profile == termenv.ANSI {
+		s.plateSel = lipgloss.NewStyle().Reverse(true)
+	} else {
+		s.plateSel = lipgloss.NewStyle().Foreground(t.color(t.CFG)).Background(t.color(t.CDim))
+	}
+	if t.CCardBG == "" {
+		s.card = lipgloss.NewStyle()
+	} else {
+		s.card = lipgloss.NewStyle().Background(lipgloss.Color(t.CCardBG))
+	}
+	if t.CCardBG == "default" {
+		s.cardState = sgrState{bg: []int{49}}
+	} else {
+		s.cardState = extractSGR(s.card.Render("x"))
+	}
+	if t.CCodeBG == "" {
+		s.codeBG = lipgloss.NewStyle()
+	} else {
+		s.codeBG = lipgloss.NewStyle().Background(lipgloss.Color(t.CCodeBG))
+	}
+	if t.CCodeBG == "default" {
+		s.codeState = sgrState{bg: []int{49}}
+	} else {
+		s.codeState = extractSGR(s.codeBG.Render("x"))
+	}
+	if st := lipgloss.NewStyle().Background(t.color(t.CFG)); t.CCardBG != "" {
+		st = st.Foreground(lipgloss.Color(t.CCardBG))
+		s.cardCursor = st
+	}
+	if t.NoColor || t.Profile == termenv.ANSI {
+		s.cardSel = lipgloss.NewStyle().Reverse(true)
+	} else {
+		s.cardSel = lipgloss.NewStyle().Foreground(t.color(t.CFG)).Background(t.color(t.CDim))
+	}
+	if t.CCardBG == "" || t.CAccent == "default" {
+		s.sessBand = lipgloss.NewStyle().Reverse(true)
+	} else {
+		s.sessBand = lipgloss.NewStyle().Foreground(lipgloss.Color(t.CCardBG)).Background(lipgloss.Color(t.CAccent))
+	}
+	s.sweepMid = t.fg(t.CAccent)
+	s.sweepDim = t.fgScaled(t.CAccent, 0.45)
+	s.sweepHot = t.fgScaled(t.CAccent, 1.5)
+	return s
+}
+
+// barBase is the input-bar text style with the bar surface baked in.
+func (t *Theme) barBase(c string) Style {
+	st := lipgloss.NewStyle().Foreground(t.color(c))
+	if t.CBarBG != "" {
+		st = st.Background(lipgloss.Color(t.CBarBG))
+	}
+	return st
+}
 
 func (t *Theme) color(c string) lipgloss.Color {
 	if t.NoColor && c == t.CAccent {
@@ -496,22 +718,22 @@ func (t *Theme) color(c string) lipgloss.Color {
 }
 
 // Plain returns a foreground style.
-func (t *Theme) Plain() Style  { return t.fg(t.CFG) }
-func (t *Theme) Subtle() Style { return t.fg(t.CDim) }
-func (t *Theme) Faint() Style  { return t.fg(t.CFaint) }
-func (t *Theme) Accent() Style { return t.fg(t.CAccent) }
-func (t *Theme) Ok() Style     { return t.fg(t.COK) }
-func (t *Theme) Warn() Style   { return t.fg(t.CWarn) }
-func (t *Theme) Err() Style    { return t.fg(t.CErr) }
-func (t *Theme) Info() Style   { return t.fg(t.CInfo) }
+func (t *Theme) Plain() Style  { return t.styled().plain }
+func (t *Theme) Subtle() Style { return t.styled().subtle }
+func (t *Theme) Faint() Style  { return t.styled().faint }
+func (t *Theme) Accent() Style { return t.styled().accent }
+func (t *Theme) Ok() Style     { return t.styled().ok }
+func (t *Theme) Warn() Style   { return t.styled().warn }
+func (t *Theme) Err() Style    { return t.styled().err }
+func (t *Theme) Info() Style   { return t.styled().info }
 
 // User is the user-voice foreground: user prompt text rides its own color
 // instead of the former input-bar background surface.
-func (t *Theme) User() Style { return t.fg(t.CUser) }
+func (t *Theme) User() Style { return t.styled().user }
 
 // Code is the code foreground (inline + blocks): code text is told apart
 // by color instead of the former card background.
-func (t *Theme) Code() Style { return t.fg(t.CCode) }
+func (t *Theme) Code() Style { return t.styled().code }
 
 // Sel is the text-pick surface (the transcript selection band): a
 // background only — the picked lines keep their own character colors, so
@@ -520,29 +742,24 @@ func (t *Theme) Code() Style { return t.fg(t.CCode) }
 // library pass per line and never splits a rune at an edge. Under
 // NO_COLOR / 8-bit terminals there is no palette to lean on, so the band
 // falls back to reverse video.
-func (t *Theme) Sel() Style {
-	if t.NoColor || t.Profile == termenv.ANSI {
-		return lipgloss.NewStyle().Reverse(true)
-	}
-	return lipgloss.NewStyle().Background(t.color(t.CDim))
-}
-func (t *Theme) Border() Style { return t.fg(t.CBorder) }
-func (t *Theme) System() Style { return t.fg(t.CSysFG) }
+func (t *Theme) Sel() Style    { return t.styled().sel }
+func (t *Theme) Border() Style { return t.styled().border }
+func (t *Theme) System() Style { return t.styled().system }
 
 // Rule is the hairline separator style.
-func (t *Theme) Rule() Style { return t.fg(t.CBorder) }
+func (t *Theme) Rule() Style { return t.styled().rule }
 
 // Label is the small-caps section header style.
-func (t *Theme) Label() Style { return t.fg(t.CDim) }
+func (t *Theme) Label() Style { return t.styled().label }
 
 // sweepShades returns the brightness tiers of the 扫光 highlight in the
 // order dim, base, hot — three lightness levels of the same accent hue, so
 // the sweep reads as brightness moving across the verb, never a color
-// change. Built per call (not cached) so a render-time profile override
-// (tests) is honored.
+// change. Pre-built with the style set (rebuilt on a profile override,
+// which is how tests flip the tier).
 func (t *Theme) sweepShades() (dim, mid, hot Style) {
-	mid = t.fg(t.CAccent)
-	return t.fgScaled(t.CAccent, 0.45), mid, t.fgScaled(t.CAccent, 1.5)
+	s := t.styled()
+	return s.sweepDim, s.sweepMid, s.sweepHot
 }
 
 // fgScaled builds a foreground style for the palette color c with its
@@ -575,13 +792,13 @@ func (t *Theme) fgScaled(c string, factor float64) Style {
 func (t *Theme) PermChip(value string) Style {
 	switch value {
 	case "read-only":
-		return t.Subtle()
+		return t.styled().subtle
 	case "workspace-write":
-		return t.Ok()
+		return t.styled().ok
 	case "danger-full-access":
-		return t.Warn()
+		return t.styled().warn
 	default:
-		return t.Plain()
+		return t.styled().plain
 	}
 }
 
@@ -597,22 +814,10 @@ func (t *Theme) PermChip(value string) Style {
 // uniform.
 
 // Bar is the plain text style of the input line.
-func (t *Theme) Bar() Style {
-	st := lipgloss.NewStyle().Foreground(t.color(t.CFG))
-	if t.CBarBG != "" {
-		st = st.Background(lipgloss.Color(t.CBarBG))
-	}
-	return st
-}
+func (t *Theme) Bar() Style { return t.styled().bar }
 
 // BarAccent is the accent (prompt/caret) style of the input line.
-func (t *Theme) BarAccent() Style {
-	st := lipgloss.NewStyle().Foreground(t.color(t.CAccent))
-	if t.CBarBG != "" {
-		st = st.Background(lipgloss.Color(t.CBarBG))
-	}
-	return st
-}
+func (t *Theme) BarAccent() Style { return t.styled().barAccent }
 
 // BarCursor is the caret cell of the input line: the char under the
 // cursor — or a plain space at the line end — drawn in the bar's accent
@@ -621,7 +826,7 @@ func (t *Theme) BarAccent() Style {
 // background on the transparent bar — so the caret is a colored,
 // underlined char rather than an inverted block.
 func (t *Theme) BarCursor() Style {
-	return t.BarAccent().Underline(true)
+	return t.styled().barCursor
 }
 
 // BarSel is the selection mark of the input line: picked chars keep the
@@ -629,16 +834,11 @@ func (t *Theme) BarCursor() Style {
 // no reverse video — so a pick reads as an underlined run on the bar
 // surface on every profile.
 func (t *Theme) BarSel() Style {
-	return t.Bar().Underline(true)
+	return t.styled().barSel
 }
 
 // BarBG is the bare input surface, used for padding.
-func (t *Theme) BarBG() Style {
-	if t.CBarBG == "" {
-		return lipgloss.NewStyle()
-	}
-	return lipgloss.NewStyle().Background(lipgloss.Color(t.CBarBG))
-}
+func (t *Theme) BarBG() Style { return t.styled().barBG }
 
 // BarBGSeq returns the bare SGR escape (ESC[...m) that sets the bar
 // background — the exact code lipgloss emits for the input bar surface,
@@ -646,17 +846,9 @@ func (t *Theme) BarBG() Style {
 // lines composed of pre-styled segments (markdown output) whose internal
 // SGR resets would otherwise expose the terminal's own background.
 func (t *Theme) BarBGSeq() string {
-	if t.CBarBG == "" {
-		return ""
-	}
-	// Render one cell through the bar surface style and take the SGR
-	// prefix: it is byte-for-byte the same code the input box draws with,
-	// regardless of the active color profile.
-	raw := t.BarBG().Render("x")
-	if i := strings.IndexByte(raw, 'x'); i > 0 {
-		return raw[:i]
-	}
-	return ""
+	// Pre-built from one rendered cell: byte-for-byte the code the
+	// input box draws with, regardless of the active color profile.
+	return t.styled().barBGSeq
 }
 
 // BarSurface re-emits an ANSI-styled line with the bar background forced
@@ -717,63 +909,45 @@ func (t *Theme) pfg(c string) Style {
 }
 
 // Plate is the bare modal surface, used for padding.
-func (t *Theme) Plate() Style {
-	if t.CModalBG == "" {
-		return lipgloss.NewStyle()
-	}
-	return lipgloss.NewStyle().Background(lipgloss.Color(t.CModalBG))
-}
+func (t *Theme) Plate() Style { return t.styled().plate }
 
-func (t *Theme) PlatePlain() Style  { return t.pfg(t.CFG) }
-func (t *Theme) PlateSubtle() Style { return t.pfg(t.CDim) }
-func (t *Theme) PlateFaint() Style  { return t.pfg(t.CFaint) }
-func (t *Theme) PlateAccent() Style { return t.pfg(t.CAccent) }
-func (t *Theme) PlateOk() Style     { return t.pfg(t.COK) }
-func (t *Theme) PlateWarn() Style   { return t.pfg(t.CWarn) }
-func (t *Theme) PlateErr() Style    { return t.pfg(t.CErr) }
-func (t *Theme) PlateInfo() Style   { return t.pfg(t.CInfo) }
-func (t *Theme) PlateSystem() Style { return t.pfg(t.CSysFG) }
-func (t *Theme) PlateRule() Style   { return t.pfg(t.CBorder) }
+func (t *Theme) PlatePlain() Style  { return t.styled().platePlain }
+func (t *Theme) PlateSubtle() Style { return t.styled().plateSubtle }
+func (t *Theme) PlateFaint() Style  { return t.styled().plateFaint }
+func (t *Theme) PlateAccent() Style { return t.styled().plateAccent }
+func (t *Theme) PlateOk() Style     { return t.styled().plateOk }
+func (t *Theme) PlateWarn() Style   { return t.styled().plateWarn }
+func (t *Theme) PlateErr() Style    { return t.styled().plateErr }
+func (t *Theme) PlateInfo() Style   { return t.styled().plateInfo }
+func (t *Theme) PlateSystem() Style { return t.styled().plateSystem }
+func (t *Theme) PlateRule() Style   { return t.styled().plateRule }
 
 // PlateCursor is the reverse-video caret cell of modal text fields: the
 // char under the cursor (or a plain space at the line end) drawn inverted
 // on the plate surface - the same caret style the main input box uses on
 // its bar, so modal inputs edit with the identical look and feel.
 func (t *Theme) PlateCursor() Style {
-	st := lipgloss.NewStyle().Background(t.color(t.CFG))
-	if t.CModalBG != "" {
-		st = st.Foreground(lipgloss.Color(t.CModalBG))
-	}
-	return st
+	return t.styled().plateCursor
 }
 
 // PlateSel is the selection band of the modal text fields: the plate
 // ink on the selection background (the transcript band color).
 func (t *Theme) PlateSel() Style {
-	if t.NoColor || t.Profile == termenv.ANSI {
-		return lipgloss.NewStyle().Reverse(true)
-	}
-	return lipgloss.NewStyle().
-		Foreground(t.color(t.CFG)).
-		Background(t.color(t.CDim))
+	return t.styled().plateSel
 }
 
-// ---- card surface (session list panel) --------------------------------------------
+// ---- card surface (the popups) ------------------------------------------------
 //
-// The session list floats on the card surface (CCardBG), the
-// conversation's own background. Styled segments bake the surface into
-// their own style where a concrete color exists; on the "default"
-// surface the popup's row filler (cardLine) paints every cell the row
-// leaves without a background, so no cell of the open panel stays a
-// bare hole the underlying screen shows through.
+// The popups float on the card surface (CCardBG): a raised panel a step
+// off the page, so an open box is visible against the conversation
+// behind it. Styled segments bake the surface into their own style where
+// a concrete color exists; where the palette has no card color the
+// popup's row filler (cardLine) still paints every cell the row leaves
+// without a background, so no cell of the open panel stays a bare hole
+// the underlying screen shows through.
 
 // Card is the bare card surface, used for padding.
-func (t *Theme) Card() Style {
-	if t.CCardBG == "" {
-		return lipgloss.NewStyle()
-	}
-	return lipgloss.NewStyle().Background(lipgloss.Color(t.CCardBG))
-}
+func (t *Theme) Card() Style { return t.styled().card }
 
 // CardState is the card surface as the SGR state a cell carries (the
 // empty state when the palette has no card color): the popup's row
@@ -781,11 +955,20 @@ func (t *Theme) Card() Style {
 // so the box interior is opaque. "default" is SGR 49 — lipgloss renders
 // it as no code at all, so the state is built by hand.
 func (t *Theme) CardState() sgrState {
-	if t.CCardBG == "default" {
-		return sgrState{bg: []int{49}}
-	}
-	return extractSGR(t.Card().Render("x"))
+	return t.styled().cardState
 }
+
+// CodeState is the code-region surface (the run_code slab) as the SGR
+// state a cell carries: cardLine merges it into every cell a card line
+// leaves without a background of its own. The empty state (NoColor, or
+// a palette without a slab color) leaves the lines on the page.
+func (t *Theme) CodeState() sgrState {
+	return t.styled().codeState
+}
+
+// CardEdge is the popup frame's hairline: a step further off the page
+// than the panel it outlines, so the outline still reads on the card.
+func (t *Theme) CardEdge() Style { return t.styled().cardEdge }
 
 // CardStyle returns the foreground style fg with the card surface baked in.
 func (t *Theme) CardStyle(fg Style) Style {
@@ -800,36 +983,20 @@ func (t *Theme) CardStyle(fg Style) Style {
 // plain space at the line end — drawn inverted on the card surface, the
 // same caret style the main input box and the modal fields use.
 func (t *Theme) CardCursor() Style {
-	st := lipgloss.NewStyle().Background(t.color(t.CFG))
-	if t.CCardBG != "" {
-		st = st.Foreground(lipgloss.Color(t.CCardBG))
-	}
-	return st
+	return t.styled().cardCursor
 }
 
 // CardSel is the selection band of the card surface's edit line: the
 // card ink on the selection background — the plate fields' band, on the
 // card.
 func (t *Theme) CardSel() Style {
-	if t.NoColor || t.Profile == termenv.ANSI {
-		return lipgloss.NewStyle().Reverse(true)
-	}
-	return lipgloss.NewStyle().
-		Foreground(t.color(t.CFG)).
-		Background(t.color(t.CDim))
+	return t.styled().cardSel
 }
 
 // SessBand is the pick band of the session window (crush's selected
 // session row): the brand accent as a solid surface with the card ink on
 // top — a full-width inverted row on the window.
-func (t *Theme) SessBand() Style {
-	if t.CCardBG == "" || t.CAccent == "default" {
-		return lipgloss.NewStyle().Reverse(true)
-	}
-	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color(t.CCardBG)).
-		Background(lipgloss.Color(t.CAccent))
-}
+func (t *Theme) SessBand() Style { return t.styled().sessBand }
 
 // gradRail is the session window's title rail: an ASCII-art wind streak
 // beside the dialog title — '+' / '-' / '.' / '`' cells that flow from a

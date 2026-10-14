@@ -32,23 +32,34 @@ const (
 
 // ToolBlock is one tool call with, once matched, its result.
 type ToolBlock struct {
-	Id         string
-	Name       string
-	Args       string
-	ArgsFull   string
+	Id       string
+	Name     string
+	Args     string
+	ArgsFull string
+	// argsDelta: streaming accumulation on the in-flight curBlocks entry
+	// only (zero in published copies) — strings.Builder: per-delta += on
+	// a string grows quadratically in the argument size.
+	argsDelta  strings.Builder
 	ResultText string
 	IsError    bool
 	Done       bool
 	CallSeq    int64
 	CallTime   int64
 	DoneTime   int64 // 0 until the result lands (or the turn-end sweep)
+	// Meta is the tool's private presentation payload from the result
+	// event (diffs, read windows, search groups): opaque to the fold,
+	// read by the renderer for the structured card.
+	Meta json.RawMessage
 }
 
 // ABlock is one assistant content block in display order.
 type ABlock struct {
 	Kind string // "text" | "reasoning" | "tool"
 	Text string
-	Tool *ToolBlock
+	// delta: streaming accumulation on the in-flight curBlocks entry
+	// only (zero in published copies); flushed into Text on each publish.
+	delta strings.Builder
+	Tool  *ToolBlock
 }
 
 // Item is one transcript row.
@@ -118,6 +129,13 @@ type Transcript struct {
 	// only the delta), and carried by the in-flight item for the readouts.
 	streamUsage   *protocol.TokenUsage
 	streamSampled bool // the step's generation sample is on record
+	// streamPending / streamPubAt pace the streaming item's publishes:
+	// content deltas accumulate and flush in one item rebuild (publish
+	// every streamPublishEvery deltas or streamPublishMinMs of host
+	// time) — a per-delta rebuild is an O(len(Items)) slice copy each.
+	streamPending int
+	streamPubAt   int64
+	lastChunkAt   int64 // host time of the newest chunk (the final flush's stamp)
 	// tool-call result matching
 	openTools map[string]*ToolBlock
 	// turn bookkeeping (exposed for store-level stats)
@@ -147,9 +165,15 @@ const GenWindow = 60 * time.Second
 // carry an OLDER turn's start instead: any turn-bound event whose number
 // differs from the recorded one (both known) invalidates the start, so
 // the elapsed readout degrades to "0s" instead of counting from a foreign
-// (or 1970) timestamp.
+// (or 1970) timestamp. curTurn records the newest turn number seen even
+// when no start is on record, so a re-baseline can tell which turn the
+// rebuilt fold is mid-way through.
 func (t *Transcript) attrTurn(n int) {
-	if n > 0 && t.TurnStartNum > 0 && n != t.TurnStartNum {
+	if n <= 0 {
+		return
+	}
+	t.curTurn = n
+	if t.TurnStartNum > 0 && n != t.TurnStartNum {
 		t.TurnStartAt = 0
 		t.TurnStartNum = n
 	}
@@ -243,6 +267,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		t.TurnActive = true
 		t.TurnStartAt = ev.Time
 		t.TurnStartNum = d.Turn
+		t.curTurn = d.Turn
 		t.TurnTokens = TurnTokens{}
 		return true, nil
 	case "turn/end":
@@ -324,6 +349,24 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		t.applyChunk(d.Chunk, ev.Time)
 		t.noteSeq(ev.Seq, ev.Time)
 		return true, nil
+	case "assistant/stream-end":
+		// Synthetic frame (the follow stream's assistant-stream end, see
+		// client.emitAssistantStream): a committed attempt is superseded
+		// by the assistant/message event itself; an abandoned one (retry,
+		// stream error) committed nothing — drop the partial row the
+		// chunks built, as the web client drops its in-flight card.
+		var d struct {
+			Outcome string `json:"outcome"`
+		}
+		if json.Unmarshal(ev.Data, &d) != nil || d.Outcome != "abandoned" || !t.streaming {
+			return false, nil
+		}
+		if t.curItemIdx >= 0 {
+			t.removeItem(t.curItemIdx)
+		}
+		t.streaming, t.streamItem, t.curItem, t.curItemIdx = false, nil, nil, -1
+		t.curBlocks, t.curOrder, t.streamUsage = map[int]*ABlock{}, nil, nil
+		return true, nil
 	case "tool/call":
 		var d protocol.ToolCallEventData
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
@@ -341,18 +384,29 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		}
 		t.attrTurn(d.Turn)
 		matched := false
-		for _, b := range d.Message.Content {
-			if b.Type != "tool-result" {
-				continue
+		settle := func(id string, blocks []protocol.ContentBlock, isErr bool) {
+			tb, ok := t.openTools[id]
+			if !ok {
+				return
 			}
-			if tb, ok := t.openTools[b.ToolCallId]; ok {
-				tb.ResultText = protocol.ToolResultText(b.Content)
-				tb.IsError = b.IsError || d.Error != nil
-				tb.Done = true
-				tb.DoneTime = ev.Time
-				matched = true
-				t.bumpToolItems(tb)
-				delete(t.openTools, b.ToolCallId)
+			tb.ResultText = protocol.ToolResultText(blocks)
+			tb.IsError = isErr || d.Error != nil
+			tb.Meta = d.Meta
+			tb.Done = true
+			tb.DoneTime = ev.Time
+			matched = true
+			t.bumpToolItems(tb)
+			delete(t.openTools, id)
+		}
+		// Current hosts carry the call identity on the result message
+		// itself and its content is the raw result blocks; older ones
+		// wrapped each result in a tool-result content block.
+		if d.Message.ToolCallId != "" {
+			settle(d.Message.ToolCallId, d.Message.Content, d.Message.IsError)
+		}
+		for _, b := range d.Message.Content {
+			if b.Type == "tool-result" {
+				settle(b.ToolCallId, b.Content, b.IsError)
 			}
 		}
 		if !matched {
@@ -437,10 +491,13 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		"goal/change", "web/deepseek-search-llm-request",
 		// Upgraded-build side-state records: attempt traces, the system
 		// prompt node, model/policy bookkeeping, feedback and delivery
-		// acks — none of them is a transcript line.
+		// acks, developer messages (tool add/remove notices), image
+		// offload and workspace-change records — none of them is a
+		// transcript line.
 		"assistant/attempt", "deliverables/presented", "feedback/message-delete",
 		"feedback/message-put", "model/selection", "session-log-deepseek/delivery-accepted",
-		"subagent/catalog", "subagent/model-selection-policy", "system/message":
+		"subagent/catalog", "subagent/model-selection-policy", "system/message",
+		"developer/message", "image/offload", "workspace/changes":
 		// Side-state or metadata events: no transcript row of their own.
 		t.noteSeq(ev.Seq, ev.Time)
 		return false, nil
@@ -587,6 +644,15 @@ func (t *Transcript) Streaming() *Item {
 
 // ---- streaming assembly ----------------------------------------------------
 
+// Streaming publish pacing: content deltas accumulate in the live blocks
+// and flush in one item rebuild (every streamPublishEvery deltas or
+// streamPublishMinMs of host time). A per-delta rebuild copies the whole
+// Items slice, so on a long transcript the fold ran away with the CPU.
+const (
+	streamPublishEvery = 8
+	streamPublishMinMs = 50
+)
+
 func (t *Transcript) beginStreaming(turn, step int) bool {
 	if t.streaming && t.curTurn == turn && t.curStep == step {
 		return true
@@ -602,6 +668,9 @@ func (t *Transcript) beginStreaming(turn, step int) bool {
 	t.curItem = nil
 	t.streamUsage = nil
 	t.streamSampled = false
+	t.streamPending = 0
+	t.streamPubAt = 0
+	t.lastChunkAt = 0
 	return true
 }
 
@@ -610,26 +679,32 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 	case "block-start":
 		if _, ok := t.curBlocks[c.Index]; !ok {
 			b := &ABlock{Kind: "text"}
-			if c.Block != nil {
-				switch c.Block.Type {
-				case "reasoning":
-					b.Kind = "reasoning"
-				case "tool-call":
-					b.Kind = "tool"
+			// Older hosts opened a block with the full block; current
+			// ones carry just the kind (content arrives at block-end).
+			bt := c.BlockType
+			if bt == "" && c.Block != nil {
+				bt = c.Block.Type
+			}
+			switch bt {
+			case "reasoning":
+				b.Kind = "reasoning"
+			case "tool-call":
+				b.Kind = "tool"
+				if c.Block != nil {
 					b.Tool = &ToolBlock{Id: c.Block.Id, Name: textutil.StripTerminal(c.Block.Name), ArgsFull: textutil.StripTerminal(c.Block.Arguments), Args: textutil.StripTerminal(c.Block.Arguments), CallTime: time}
-				default:
-					b.Kind = "text"
+				} else {
+					b.Tool = &ToolBlock{CallTime: time}
 				}
+			default:
+				b.Kind = "text"
 			}
 			t.curBlocks[c.Index] = b
 			t.curOrder = append(t.curOrder, c.Index)
 		}
 	case "text-delta":
-		b := t.ensureStreamBlock(c.Index, "text", time)
-		b.Text += textutil.StripTerminal(c.Text)
+		t.ensureStreamBlock(c.Index, "text", time).delta.WriteString(c.Text)
 	case "reasoning-delta":
-		b := t.ensureStreamBlock(c.Index, "reasoning", time)
-		b.Text += textutil.StripTerminal(c.Text)
+		t.ensureStreamBlock(c.Index, "reasoning", time).delta.WriteString(c.Text)
 	case "tool-call-delta":
 		b := t.ensureStreamBlock(c.Index, "tool", time)
 		if b.Tool == nil {
@@ -641,8 +716,7 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 		if c.Name != "" {
 			b.Tool.Name = textutil.StripTerminal(c.Name)
 		}
-		b.Tool.Args += textutil.StripTerminal(c.ArgumentsDelta)
-		b.Tool.ArgsFull += textutil.StripTerminal(c.ArgumentsDelta)
+		b.Tool.argsDelta.WriteString(c.ArgumentsDelta)
 	case "block-end":
 		if c.Block != nil {
 			if b, ok := t.curBlocks[c.Index]; ok {
@@ -673,7 +747,20 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 			// partial stays for the canonical message to finalize.
 		}
 	}
-	t.refreshStreamingItem(time)
+	switch c.Type {
+	case "text-delta", "reasoning-delta", "tool-call-delta":
+		// Coalesce: a delta alone does not rebuild the item.
+		t.streamPending++
+		t.lastChunkAt = time
+		if t.streamPending < streamPublishEvery && time-t.streamPubAt < streamPublishMinMs {
+			return
+		}
+	default:
+		// Structural chunk (block start/end, usage, finish): the preview
+		// must reflect it at once.
+		t.lastChunkAt = time
+	}
+	t.publishStreaming(time)
 }
 
 func (t *Transcript) ensureStreamBlock(index int, kind string, time int64) *ABlock {
@@ -691,7 +778,24 @@ func (t *Transcript) ensureStreamBlock(index int, kind string, time int64) *ABlo
 	return b
 }
 
-func (t *Transcript) refreshStreamingItem(time int64) {
+// publishStreaming folds the accumulated deltas into the live blocks and
+// republishes the in-flight item (COW, same gen, ver bumped).
+func (t *Transcript) publishStreaming(time int64) {
+	t.streamPending = 0
+	t.streamPubAt = time
+	for idx := range t.curBlocks {
+		b := t.curBlocks[idx]
+		if b.delta.Len() > 0 {
+			// Strip the full text once: a complete escape sequence never
+			// straddles two deltas, so one strip equals per-delta strips.
+			b.Text += textutil.StripTerminal(b.delta.String())
+			b.delta.Reset()
+		}
+		if b.Tool != nil && b.Tool.argsDelta.Len() > 0 {
+			b.Tool.ArgsFull += textutil.StripTerminal(b.Tool.argsDelta.String())
+			b.Tool.argsDelta.Reset()
+		}
+	}
 	sort.Slice(t.curOrder, func(i, j int) bool { return t.curOrder[i] < t.curOrder[j] })
 	blocks := make([]ABlock, 0, len(t.curOrder))
 	for _, idx := range t.curOrder {
@@ -728,6 +832,11 @@ func (t *Transcript) refreshStreamingItem(time int64) {
 func (t *Transcript) finalizeStreaming() {
 	if !t.streaming {
 		return
+	}
+	// Flush the pacing-deferred tail: an interrupted step (no canonical
+	// message) keeps this partial as its display form.
+	if t.curItem != nil {
+		t.publishStreaming(t.lastChunkAt)
 	}
 	// A message that never reached assistant/message (interrupt mid-stream)
 	// keeps its partial, marked as such by the turn/end marker.

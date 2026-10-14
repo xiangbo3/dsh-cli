@@ -376,7 +376,9 @@ func TestConnectChildDied(t *testing.T) {
 
 // TestConnectSlowHost pins the probe nuance: a host that merely times
 // out (not refused) is not relaunched — the accept-and-hold listener eats
-// connections without answering.
+// connections without answering. A timeout is a hung host: Connect kills
+// it (best-effort — no lsof/pkill here) and proceeds to relaunch; with no
+// launcher the normal host.down flow reports it.
 func TestConnectSlowHost(t *testing.T) {
 	port := freePort(t)
 	l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))

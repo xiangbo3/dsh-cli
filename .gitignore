@@ -1,17 +1,14 @@
-# build output
+# output
 /dsh-cli
 /releases/
 
-# project-local build state (auto-created by the Makefile)
+# build files
 /.gocache/
 /.gotmp/
+*.log
 
-# local dev notes & scripts — do not upload
 /AGENTS.md
 /smoke.sh
-
-# scratch
-*.log
 
 # git
 /.git/

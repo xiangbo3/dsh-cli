@@ -114,7 +114,7 @@ func (a *App) persistBaselineCache() {
 	}
 	// Atomic-ish replace: temp file in the same directory, then rename.
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return
 	}
 	_ = os.Rename(tmp, p)

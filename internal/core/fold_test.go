@@ -586,3 +586,112 @@ func TestGenUniqueAcrossTranscripts(t *testing.T) {
 		}
 	}
 }
+
+// TestFoldToolResultMessageLevel pins the current host's tool/result
+// shape: the result message carries toolCallId/isError itself and its
+// content is the raw result blocks (no tool-result wrapper).
+func TestFoldToolResultMessageLevel(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(ev(t, "tool/call", 1, map[string]any{
+		"turn": 1, "step": 1, "callId": "call-9", "name": "bash", "arguments": "ls",
+	}))
+	tr.Apply(ev(t, "assistant/message", 2, map[string]any{
+		"turn": 1, "step": 1,
+		"message": map[string]any{
+			"id": "m9", "role": "assistant",
+			"content": []any{map[string]any{"type": "tool-call", "id": "call-9", "name": "bash", "arguments": "ls"}},
+			"source":  map[string]any{"kind": "model"},
+		},
+	}))
+	tr.Apply(ev(t, "tool/result", 3, map[string]any{
+		"turn": 1, "step": 1,
+		"message": map[string]any{
+			"id": "r9", "role": "tool", "toolCallId": "call-9", "isError": true,
+			"content": []any{map[string]any{"type": "text", "text": "boom"}},
+			"source":  map[string]any{"kind": "tool"},
+		},
+		"meta": map[string]any{"card": "terminal", "exitCode": 2},
+	}))
+	for _, it := range tr.Items {
+		if it.Kind == KindNote {
+			t.Fatalf("unexpected note: %q", it.Note)
+		}
+	}
+	if len(tr.openTools) != 0 {
+		t.Fatalf("open tools remain: %v", tr.openTools)
+	}
+	var tb *ToolBlock
+	for _, it := range tr.Items {
+		for _, b := range it.Blocks {
+			if b.Tool != nil && b.Tool.Id == "call-9" {
+				tb = b.Tool
+			}
+		}
+	}
+	if tb == nil || !tb.Done || !tb.IsError || tb.ResultText != "boom" || len(tb.Meta) == 0 {
+		t.Fatalf("tool block = %+v", tb)
+	}
+}
+
+// TestFoldStreamEndAbandoned pins the synthetic assistant/stream-end
+// frame: an abandoned attempt drops the partial streaming row (the web
+// client removes its in-flight card); a committed one keeps it for the
+// canonical message to replace.
+func TestFoldStreamEndAbandoned(t *testing.T) {
+	chunk := func(seq int64, text string) *protocol.SessionEvent {
+		return ev(t, "assistant/chunk", seq, map[string]any{
+			"turn": 1, "step": 1,
+			"chunk": map[string]any{"type": "text-delta", "index": 0, "text": text},
+		})
+	}
+	tr := NewTranscript()
+	// The fold paces its publishes (every streamPublishEvery deltas): fill
+	// past the threshold so the partial row is actually on screen.
+	for i := 0; i <= streamPublishEvery; i++ {
+		tr.Apply(chunk(0, "hal"))
+	}
+	if len(tr.Items) != 1 {
+		t.Fatalf("items = %d, want the partial row", len(tr.Items))
+	}
+	tr.Apply(ev(t, "assistant/stream-end", 0, map[string]any{"outcome": "abandoned"}))
+	if len(tr.Items) != 0 {
+		t.Fatalf("items = %d, want the partial dropped", len(tr.Items))
+	}
+	if tr.streaming {
+		t.Fatal("streaming must be reset")
+	}
+	// A committed end keeps the partial; the canonical message replaces it.
+	for i := 0; i <= streamPublishEvery; i++ {
+		tr.Apply(chunk(0, "hel"))
+	}
+	tr.Apply(ev(t, "assistant/stream-end", 0, map[string]any{"outcome": "committed"}))
+	if len(tr.Items) != 1 {
+		t.Fatalf("items = %d, want the partial kept", len(tr.Items))
+	}
+	tr.Apply(ev(t, "assistant/message", 5, assistantMsg("m1", "text")))
+	if len(tr.Items) != 1 || tr.Items[0].Kind != KindAssistant {
+		t.Fatalf("items = %+v, want the canonical message", tr.Items)
+	}
+}
+
+// TestFoldBlockType pins the current host's block-start chunk: it
+// carries blockType, not the full block.
+func TestFoldBlockType(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(ev(t, "assistant/chunk", 0, map[string]any{
+		"turn": 1, "step": 1,
+		"chunk": map[string]any{"type": "block-start", "index": 0, "blockType": "reasoning"},
+	}))
+	tr.Apply(ev(t, "assistant/chunk", 0, map[string]any{
+		"turn": 1, "step": 1,
+		"chunk": map[string]any{"type": "reasoning-delta", "index": 0, "text": "think"},
+	}))
+	tr.finalizeStreaming()
+	if len(tr.Items) != 1 {
+		t.Fatalf("items = %d", len(tr.Items))
+	}
+	bs := tr.Items[0].Blocks
+	if len(bs) != 1 || bs[0].Kind != "reasoning" || bs[0].Text != "think" {
+		t.Fatalf("blocks = %+v", bs)
+	}
+}

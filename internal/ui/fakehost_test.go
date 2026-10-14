@@ -219,7 +219,7 @@ func (fh *fakeHost) unary(method string, payload json.RawMessage) any {
 		return map[string]any{"writable": true, "namespaces": ns}
 	case "settings.mutate":
 		var p struct {
-			Ns  string             `json:"ns"`
+			Ns  string               `json:"ns"`
 			Ops []protocol.SettingOp `json:"ops"`
 		}
 		_ = json.Unmarshal(payload, &p)

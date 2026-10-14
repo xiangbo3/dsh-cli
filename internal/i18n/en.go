@@ -17,6 +17,7 @@ var en = map[string]string{
 	"no.session":     "(no session)",
 	"top.connecting": "connecting…",
 	"top.idle":       "· idle",
+	"top.newsession": "new session",
 	"verb.thinking":  "thinking",
 	"verb.working":   "working",
 	"verb.reasoning": "reasoning",
@@ -34,6 +35,7 @@ var en = map[string]string{
 	"notice.turn.done":        "turn done in %s",
 	"notice.turn.interrupted": "turn interrupted after %s",
 	"notice.turn.maxtokens":   "turn stopped at max tokens",
+	"notice.turn.forked":      "turn forked after %s",
 	"notice.turn.ended":       "turn ended: %s",
 
 	// ---- session window
@@ -77,7 +79,7 @@ var en = map[string]string{
 	// ---- bottom status line
 	"status.hints.idle":    "ctrl+h help · ctrl+q quit",
 	"status.hints.running": "esc interrupt · enter steer · alt+enter queue",
-	"status.hints.dock":    "1-5 tabs · ctrl+t close",
+	"status.hints.dock":    "ctrl+1..5 tabs · ctrl+t close",
 	"status.hints.side":    "space pick · enter open · esc close",
 	"status.newlines":      "↓ %s new",
 	"status.live":          "live",
@@ -172,7 +174,7 @@ var en = map[string]string{
 	"help.hint":              "  ↑↓ browse · enter close · esc clear search",
 	"help.sec.input":         "  Input",
 	"help.enter.send":        "    enter                send (steers while running)",
-	"help.enter.newline":     "    shift+enter          insert a newline",
+	"help.enter.newline":     "    shift+enter / ctrl+j insert a newline",
 	"help.slash.cmd":         "    /                    command menu (@ reserved)",
 	"help.tab":               "    tab                  complete slash command",
 	"help.history":           "    up / down            prompt history (multi-line: rows first)",
@@ -198,13 +200,13 @@ var en = map[string]string{
 	"help.nav.side.keys":     "    (in window)          ↑↓/←→ · space select · enter · esc",
 	"help.nav.dock":          "    ctrl+t               toggle dock (input empty)",
 	"help.nav.prevnext":      "    ← / →              prev / next session (workspace + search)",
-	"help.nav.docktab":       "    1 .. 5 / ← / →     dock tab (dock open, input empty)",
+	"help.nav.docktab":       "    ctrl+1..5 / ←/→    dock tab (dock open)",
 	"help.sec.session":       "  Session",
 	"help.session.model":     "    ctrl+n               model picker",
 	"help.session.mode":      "    ctrl+o               mode: standard / ptc / minimal / creator",
 	"help.session.perm":      "    ctrl+p               permission: read-only / workspace / full",
 	"help.session.workspace": "    ctrl+w               workspace: add / rename / delete",
-	"help.session.fork":      "    f                    fork a session at the view (input empty)",
+	"help.session.fork":      "    ctrl+f               fork a session at the view (input empty)",
 	"help.session.dropq":     "    ctrl+x               drop the oldest queued message",
 	"help.session.verbose":   "    ctrl+e               toggle verbose detail (input empty)",
 	"help.session.help":      "    ctrl+h               help window (search filters entries)",
@@ -323,6 +325,7 @@ var en = map[string]string{
 	"turnend.blocked":        "  %s blocked%s",
 	"turnend.maxtokens":      "  %s stopped at max tokens%s",
 	"turnend.maxtokens.hint": "  /compact to compress context, or switch to a larger-context model",
+	"turnend.forked":         "  %s forked after %s%s",
 	"turnend.unknown":        "ended without a reason",
 
 	// ---- one-shot CLI (status / ls / workspaces)

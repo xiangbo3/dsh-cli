@@ -1,5 +1,108 @@
 # Changelog
 
+## 1.0.53
+
+### Added
+
+- `run_code` cards ride a subtle background slab — a shade darker than
+  the window background in every theme (dark, light and the terminal's
+  own) — so a stretch of executed code is visible at a glance.
+- Tool cards read like the web client: the title shows the command, the
+  path or the pattern instead of raw JSON; an expanded result paints a
+  structured card — a read window with line numbers and syntax
+  highlighting, a colored diff, search matches grouped by file, web
+  citations — and plain output colors diff lines.
+- Thinking renders as markdown (quietly), so lists and code inside a
+  chain of thought read like the answer does.
+
+### 新增
+
+- `run_code` 卡片衬一层淡淡的背景色——深色、浅色及终端自绘主题下都
+  比窗口背景略深——一眼即可认出这是一段执行的代码。
+- 工具卡片对齐网页端：标题显示命令、路径或模式而非原始 JSON；展开
+  结果渲染结构化卡片——带行号与语法高亮的文件读取窗口、彩色差异、
+  按文件分组的搜索命中、网页引用——普通输出中的差异行也会着色。
+- 思考内容改为 markdown 渲染（弱化色），思考中的列表与代码与正文
+  同样易读。
+
+### Changed
+
+- Fork moved from `f` to `ctrl+f`, and dock tabs from bare `1`–`5` to
+  `ctrl+1`–`ctrl+5`: typing a letter or a digit in the input no longer
+  triggers them.
+
+### 变更
+
+- 分叉快捷键由 `f` 改为 `ctrl+f`，侧栏标签由 `1`–`5` 改为
+  `ctrl+1`–`ctrl+5`：在输入框打字不再误触这两个功能。
+
+### Fixed
+
+- Works with the updated dsh host again: live streaming, tool results
+  and turn endings all changed shape on the wire; abandoned model
+  retries no longer leave half an answer on screen, and a turn ended by
+  forking shows a quiet marker instead of an error.
+- Two keys break the line in the input bar: `shift+enter` and `ctrl+j`.
+  `shift+enter` is now reported correctly in kitty, WezTerm, Ghostty,
+  foot and iTerm2; a terminal that cannot tell it from enter at all
+  (Alacritty, GNOME Terminal) still sends, and there `ctrl+j` is the
+  newline.
+- `/new` no longer leaves the top bar reading "(no session)": a fresh,
+  still-untitled session shows "new session".
+- The session window and dialog boxes no longer cover the pinned input
+  bar at the bottom of the window.
+- The subagent dock (ctrl+t) lists the session's real children with
+  their live running state; it used to query an endpoint the host does
+  not serve and always looked empty.
+- The spinner glyph before the thinking status in the top bar is gone.
+- Fixed a crash at narrow window sizes: the top bar could compute a
+  negative pad.
+- The turn timer no longer resets to 0s on long turns: a mid-turn
+  reconnect keeps the turn's known start instead of losing it together
+  with the history page it fell off.
+- Popups (the session window and all dialogs) now scale with the window
+  (about 60% of its width and height) instead of staying a fixed size.
+- Fixed popup borders losing their right edge or going crooked in CJK
+  locales: the width model now counts ambiguous glyphs one column wide,
+  the way terminals render them.
+- Popups (the session window and all dialogs) now wear a raised panel
+  color of their own instead of the terminal's background, so an open
+  box no longer blends into the conversation behind it.
+- The `run_code` background slab stays under its own card: on the card's
+  rows it used to tint the whole subagent dock (ctrl+t), and it colored
+  the row below the card too.
+- The screen no longer stays garbled until the window is redrawn: the whole
+  frame is drawn again once a second, in place, so a row the terminal
+  mangles or loses repairs itself.
+
+### 修复
+
+- 适配新版 dsh 宿主：流式输出、工具结果、回合结束的线上格式均已
+  变化；被放弃的重试不再在屏幕上留下半截回答，分叉结束的回合显示
+  弱化标记而非报错。
+- 输入框有两个换行键：`shift+enter` 与 `ctrl+j`。`shift+enter` 现在在
+  kitty、WezTerm、Ghostty、foot、iTerm2 中都能被正确识别；终端本身无法
+  区分它与回车的（Alacritty、GNOME 终端）仍会发送，此时用 `ctrl+j`
+  换行。
+- `/new` 后顶栏不再显示“（无会话）”：尚无标题的新会话显示“新会话”。
+- 会话窗口与对话框不再遮挡窗口底部固定的输入栏。
+- 子代理面板（ctrl+t）现在列出真实的子代理及其运行状态；此前查询
+  宿主不存在的接口，始终显示为空。
+- 移除顶栏 thinking 状态前的转圈图标。
+- 修复窗口过窄时的崩溃：顶栏补齐宽度可能算出负数。
+- 长回合的计时不再退回 0s：回合中途重连时，已知的回合起点不再随
+  历史分页一起丢失。
+- 弹窗（会话窗口与各类对话框）改为随窗口按比例缩放（约 60%），
+  不再固定尺寸。
+- 修复中文环境下弹窗右边框缺失、边框错位：宽度模型改为按终端
+  实际渲染计宽（歧义宽度字符按 1 列计）。
+- 弹窗（会话窗口与各类对话框）改用独立的浮起面板色，不再与终端
+  背景同色，打开时不再与背后的会话内容混在一起。
+- `run_code` 的背景色只衬在卡片自身：此前打开侧栏（ctrl+t）时，卡片
+  所在行会把整个侧栏一并染色，卡片下面一行也会被多盖一行。
+- 界面错乱不再需要重绘窗口才会恢复：整屏每秒原地重画一次，被终端
+  弄乱或弄丢的行会自行恢复。
+
 ## 1.0.52
 
 ### Added
@@ -19,6 +122,27 @@
   勾选的模型加入服务商配置。
 - 输入区（输入框 + 状态栏）固定钉在窗口底部：toast、排队条、斜杠
   菜单改为覆盖在会话记录上，不再挤动输入区。
+
+### Changed
+
+- Streaming performance: long streams batch their screen updates, and a
+  long session no longer slows down as its history grows; per-frame
+  rendering overhead is reduced (theme styles and language tables are
+  pre-computed).
+- Auto-start: a host that accepts connections but never answers is now
+  detected as hung and killed and relaunched, instead of stalling the
+  client; long one-off runs are no longer cut off by a 60s hard
+  timeout.
+- Tightened file permissions: the config file, the auto-start log and
+  the baseline cache are now written 0600.
+
+### 变更
+
+- 流式性能优化：长流式输出改为批量刷新界面，长会话不再随历史增长而
+  变慢；降低每帧渲染开销（主题样式与语言表预计算）。
+- 自动启动：可连接但不响应的宿主现在会被识别为挂起并杀掉重启，客户
+  端不再卡死；长时单次运行不再被 60 秒硬超时截断。
+- 收紧文件权限：配置文件、自动启动日志与基线缓存改为 0600 写入。
 
 ### Fixed
 

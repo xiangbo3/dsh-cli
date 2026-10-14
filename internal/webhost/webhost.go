@@ -142,7 +142,15 @@ func Connect(base, held string, enabled bool) (*Host, string, error) {
 	if !loopbackBase(base) {
 		return nil, held, nil // remote: never launch or kill a foreign server
 	}
-	if !up(base) {
+	up, hung := upProbe(base)
+	if !up {
+		if hung {
+			// A hung host (socket, no answer) would fail the pre-check
+			// below as a transport error and never be restarted: kill
+			// it, best-effort — a kill that fails leaves the port held,
+			// and the relaunched child's bind failure reports it.
+			_ = killWeb(base)
+		}
 		h, tok, err := launch(base, false)
 		if h == nil && err == nil {
 			return nil, held, nil // no launcher: the host.down flow reports it
@@ -193,13 +201,17 @@ func launch(base string, restarted bool) (*Host, string, error) {
 	if dir, err := config.DataDir(); err == nil {
 		logPath = dir + "/webhost-" + port + ".log"
 	}
-	childF, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	// 0600: the log carries the launch token line.
+	childF, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if ferr != nil && logPath != "" {
 		logPath = "" // fall back to /dev/null
 		childF, ferr = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	}
 	if ferr != nil {
 		return nil, "", ferr
+	}
+	if logPath != "" {
+		_ = childF.Chmod(0o600) // an older version may have left it 0644
 	}
 	// exec hands the child its own dup of the write fd and invalidates the
 	// parent's: the pump reads the same file through a separate read fd.
@@ -564,20 +576,27 @@ func bound(base string) bool {
 
 // up probes the index with a short timeout. A timeout counts as up (a
 // slow server must not trigger a second launch).
-func up(base string) bool {
+// upProbe reports whether base answers a probe: up (any HTTP answer),
+// timedOut (the TCP connect got a socket but no answer within
+// probeTimeout — a hung host).
+func upProbe(base string) (up, timedOut bool) {
 	hc := &http.Client{Timeout: probeTimeout}
 	req, err := http.NewRequest(http.MethodGet, base+"/", nil)
 	if err != nil {
-		return false
+		return false, false
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		var ue *url.Error
-		return errors.As(err, &ue) && ue.Timeout()
+		return false, errors.As(err, &ue) && ue.Timeout()
 	}
 	_ = resp.Body.Close()
-	return true
+	return true, false
 }
+
+// up counts a timeout as up (a slow server mid-boot): the ready-poll
+// callers rely on it. Connect distinguishes the hang with upProbe.
+func up(base string) bool { u, _ := upProbe(base); return u }
 
 func mustParse(base string) *url.URL {
 	u, _ := url.Parse(base)

@@ -182,11 +182,21 @@ func TestDockTabOrder(t *testing.T) {
 		}
 	}
 
-	// 2 jumps to the second tab's visual position: jobs.
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	// ctrl+2 jumps to the second tab's visual position: jobs.
+	m.Update(tea.KeyMsg{Type: keyCtrlDigit2})
 	if m.dockTab != dockJobs {
 		t.Fatalf("dockTab = %d, want the jobs tab", m.dockTab)
 	}
+	// A plain digit types instead: the bare-number chord is gone.
+	m.inp.insertRunes([]rune("7"))
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	if m.dockTab != dockJobs {
+		t.Fatalf("dockTab = %d, plain digits must not switch tabs", m.dockTab)
+	}
+	if m.inp.value() != "73" {
+		t.Fatalf("input = %q, want the digit typed", m.inp.value())
+	}
+	m.inp.clear()
 	// ← walks back to todos, → forward to jobs again.
 	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	if m.dockTab != dockTodos {
@@ -232,6 +242,7 @@ func TestFitWidth(t *testing.T) {
 		{"plain short keeps old bytes", "hi", 5, "hi   "},
 		{"plain exact", "12345", 5, "12345"},
 		{"plain long clips", "1234567", 5, "12345"},
+		{"styled long clips close the tail", red + "1234567", 5, "\x1b[0;31m" + "12345" + reset},
 		{"styled short ending closed stays byte-identical", red + "hi" + reset, 5, red + "hi" + reset + "   "},
 		{"styled short live tail closes before pad", red + "hi", 5, "\x1b[0;31m" + "hi" + reset + "   "},
 		{"wide rune straddling edge becomes blank", "abc中", 4, "abc "},
@@ -349,14 +360,16 @@ func TestDockJobDurZeroStart(t *testing.T) {
 func TestSubTranscriptEscClose(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	fh := newFakeHost(t)
-	fh.subagents = []protocol.SubagentListEntry{{
-		Kind: "child", Id: "c1", Mode: "continuable", Activity: "running",
-		Label: "Fast child: count README lines",
-	}}
 	fh.histories["c1"] = []protocol.HistoryEntry{{
 		Event: protocol.SessionEvent{Type: "user/message", Seq: 1, Data: json.RawMessage(
 			`{"role":"user","content":[{"type":"text","text":"probe"}]}`)},
 	}}
+	// The child rides the roster: origin+parent tag it, running drives the
+	// activity dot, the title projection names it.
+	child := protocol.SessionSummary{SessionId: "c1", ParentSessionId: "s1",
+		Origin: "subagent", Running: true,
+		Projections: json.RawMessage(`{"kind":"sequenced","asOfSeq":1,"values":{"title":"Fast child: count README lines"}}`)}
+	fh.sessions = []protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp/x"}, child}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a := app.New(fh.URL)
@@ -364,23 +377,19 @@ func TestSubTranscriptEscClose(t *testing.T) {
 	t.Setenv("DSH_CLI_HOME", t.TempDir())
 	m := NewModel(a)
 	m.W, m.H = 120, 30
-	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp/x"}})
+	m.st.SetSessions(fh.sessions)
 	m.st.SetActive("s1")
 
 	m.dockVisible = true
 	m.dockTab = dockSubs
-	cmd := m.subDockRefresh()
-	if cmd == nil {
-		t.Fatal("no catalog fetch scheduled for an empty cache")
-	}
+	var cmd tea.Cmd
 	upd := func(msg tea.Msg) {
 		nv, c := m.Update(msg)
 		m = nv.(*Model)
 		cmd = c
 	}
-	upd(cmd())
-	if entries, fresh := subagentEntries("s1"); !fresh || len(entries) != 1 {
-		t.Fatalf("catalog = %d entries fresh=%v, want the seeded child", len(entries), fresh)
+	if entries := m.subagentEntries("s1"); len(entries) != 1 {
+		t.Fatalf("catalog = %d entries, want the seeded child", len(entries))
 	}
 	out := stripANSI(m.View())
 	if !strings.Contains(out, "Fast child: count README") {
@@ -431,14 +440,14 @@ func TestSubModalScroll(t *testing.T) {
 			protocol.HistoryEntry{Event: protocol.SessionEvent{Type: "turn/end", Seq: int64(2*i + 2), Data: json.RawMessage(`{}`)}},
 		)
 	}
-	fh.subagents = []protocol.SubagentListEntry{{
-		Kind: "child", Id: "c1", Mode: "continuable", Activity: "running",
-		Label: "probe child",
-	}}
 	fh.histories["c1"] = events
-	// The host roster carries the session: the async boot baseline's
-	// session.list must not clobber the store's session row.
-	fh.sessions = []protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp/x"}}
+	// The host roster carries both sessions: the async boot baseline's
+	// session.list must not clobber the store's rows (the child included —
+	// the catalog derives from it).
+	child := protocol.SessionSummary{SessionId: "c1", ParentSessionId: "s1",
+		Origin: "subagent", Running: true,
+		Projections: json.RawMessage(`{"kind":"sequenced","asOfSeq":1,"values":{"title":"probe child"}}`)}
+	fh.sessions = []protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp/x"}, child}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a := app.New(fh.URL)
@@ -446,7 +455,7 @@ func TestSubModalScroll(t *testing.T) {
 	t.Setenv("DSH_CLI_HOME", t.TempDir())
 	m := NewModel(a)
 	m.W, m.H = 120, 30
-	m.st.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Cwd: "/tmp/x"}})
+	m.st.SetSessions(fh.sessions)
 	m.st.SetActive("s1")
 	// Transcript content behind the window: the wheel must not move it
 	// while the modal is open.
@@ -464,9 +473,6 @@ func TestSubModalScroll(t *testing.T) {
 		nv, c := m.Update(msg)
 		m = nv.(*Model)
 		cmd = c
-	}
-	if c := m.subDockRefresh(); c != nil {
-		upd(c()) // the child catalog lands before the window can open
 	}
 	upd(tea.KeyMsg{Type: tea.KeyEnter}) // opens the window, schedules the page fetch
 	if cmd == nil {
@@ -497,7 +503,8 @@ func TestSubModalScroll(t *testing.T) {
 	}
 
 	// 1) The window opens on the first lines: the page head is visible,
-	//    the page tail is not (16 rows cannot hold 60 lines).
+	//    the page tail is not (the proportional window cannot hold 60
+	//    lines).
 	if s := shown(); first(s) != "msg-00" || strings.Contains(strings.Join(s, " "), "msg-29") {
 		t.Fatalf("initial window = %v, want the page head only", s)
 	}
@@ -510,9 +517,11 @@ func TestSubModalScroll(t *testing.T) {
 	}
 
 	// 3) Page down moves a full window (vis-1 lines); page up walks back.
+	//    (H=30 → mainH=23 → body 9 lines; msg lines alternate with turn
+	//    ends, so 9 visible lines carry 5 msgs.)
 	upd(tea.KeyMsg{Type: tea.KeyPgDown})
-	if s := shown(); first(s) != "msg-09" {
-		t.Fatalf("after pgdown first = %s (window = %v), want msg-09", first(s), s)
+	if s := shown(); first(s) != "msg-05" {
+		t.Fatalf("after pgdown first = %s (window = %v), want msg-05", first(s), s)
 	}
 	upd(tea.KeyMsg{Type: tea.KeyPgUp})
 	if s := shown(); first(s) != "msg-01" {
@@ -521,7 +530,7 @@ func TestSubModalScroll(t *testing.T) {
 
 	// 4) End jumps to the page tail, home back to the head.
 	upd(tea.KeyMsg{Type: tea.KeyEnd})
-	if s := shown(); !strings.Contains(strings.Join(s, " "), "msg-29") || first(s) != "msg-22" {
+	if s := shown(); !strings.Contains(strings.Join(s, " "), "msg-29") || first(s) != "msg-26" {
 		t.Fatalf("after end window = %v, want the page tail (msg-29 visible)", s)
 	}
 	upd(tea.KeyMsg{Type: tea.KeyHome})

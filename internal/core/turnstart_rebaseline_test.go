@@ -26,21 +26,24 @@ func TestSnapshotTurnStartZeroMapping(t *testing.T) {
 // TestTurnStartLostOnMidTurnRebaseline is the field bug: a long turn emits
 // more than one history page (120 events), and a reconnect / downlink-stall
 // re-baseline rebuilds the fold from the last 120-event tail — which no
-// longer contains the current turn's turn/start. The elapsed readout must
-// degrade to "0s" instead of counting from 1970 (≈20000 days), and the
-// turn-end duration must be 0 instead of the epoch span.
+// longer contains the current turn's turn/start. The old fold knew that
+// turn's start, so the re-baseline must carry it over: the elapsed readout
+// keeps counting (no reset to "0s"), and a later turn-end still measures
+// the real duration. (The zero-mapping guard above still stands: a start
+// the old fold never knew stays zero, never 1970.)
 func TestTurnStartLostOnMidTurnRebaseline(t *testing.T) {
 	s := NewStore("http://x")
 	now := time.Now().UnixMilli()
+	start := now - 3_600_000 // the turn has been running an hour
 
 	chunk := func(seq int64) *protocol.SessionEvent {
 		raw, _ := json.Marshal(map[string]any{"turn": 1, "step": 1, "chunk": map[string]any{"type": "text", "text": "x"}})
-		return &protocol.SessionEvent{Type: "assistant/chunk", Seq: seq, Time: now + seq, Data: raw}
+		return &protocol.SessionEvent{Type: "assistant/chunk", Seq: seq, Time: start + seq, Data: raw}
 	}
 
 	s.Sess("s1")
 	s.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Running: true, Cwd: "/w"}})
-	s.Event("s1", &protocol.SessionEvent{Type: "turn/start", Seq: 1, Time: now, Data: mustJSON(`{"turn":1}`)})
+	s.Event("s1", &protocol.SessionEvent{Type: "turn/start", Seq: 1, Time: start, Data: mustJSON(`{"turn":1}`)})
 	var all []*protocol.SessionEvent
 	for seq := int64(2); seq <= 131; seq++ {
 		e := chunk(seq)
@@ -60,8 +63,11 @@ func TestTurnStartLostOnMidTurnRebaseline(t *testing.T) {
 	s.LoadTail("s1", tail)
 
 	snap := s.Get("s1")
-	if !snap.TurnStart.IsZero() {
-		t.Fatalf("TurnStart = %v, want zero (start event outside the tail page)", snap.TurnStart)
+	if snap.TurnStart.IsZero() {
+		t.Fatal("TurnStart lost across the re-baseline (elapsed would reset to 0s)")
+	}
+	if got := snap.TurnStart.UnixMilli(); got != start {
+		t.Fatalf("TurnStart = %d, want the carried-over %d", got, start)
 	}
 	// The UI readout, exactly as the top bar renders it (guarded): without
 	// the guard, time.Since on the zero time overflows the int64 Duration
@@ -70,20 +76,71 @@ func TestTurnStartLostOnMidTurnRebaseline(t *testing.T) {
 	if !snap.TurnStart.IsZero() {
 		elapsed = textutil.HumanDuration(time.Since(snap.TurnStart))
 	}
-	if elapsed != "0s" {
-		t.Fatalf("elapsed readout = %q, want 0s", elapsed)
+	if elapsed == "0s" {
+		t.Fatalf("elapsed readout reset to 0s across the re-baseline")
+	}
+	if elapsed != "1h" {
+		t.Fatalf("elapsed readout = %q, want 1h (the hour-long turn kept counting)", elapsed)
 	}
 
-	// turn/end with the start lost: duration 0, not the epoch span.
+	// turn/end after the re-baseline: the carried-over start still
+	// measures the turn's real duration.
 	s.Event("s1", &protocol.SessionEvent{Type: "turn/end", Seq: 132, Time: now + 200,
 		Data: mustJSON(`{"turn":1,"reason":{"kind":"completed"}}`)})
 	select {
 	case info := <-s.EndOfTurn():
-		if info.Ms != 0 {
-			t.Fatalf("turn-end Ms = %d, want 0 (start lost)", info.Ms)
+		if want := int64(3_600_000 + 200); info.Ms != want {
+			t.Fatalf("turn-end Ms = %d, want %d (start carried over)", info.Ms, want)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no turn-end delivered")
+	}
+}
+
+// TestTurnStartCarryOverBoundary pins the carry-over's two guards: a tail
+// page that spans the previous turn's end must restore the CURRENT turn's
+// start (not the previous turn's), and a tail that already carries a newer
+// turn's start must not be overwritten by the old fold's.
+func TestTurnStartCarryOverBoundary(t *testing.T) {
+	now := time.Now().UnixMilli()
+	ev := func(typ string, seq int64, v map[string]any) protocol.HistoryEntry {
+		raw, _ := json.Marshal(v)
+		return protocol.HistoryEntry{Event: protocol.SessionEvent{Type: typ, Seq: seq, Time: now + seq, Data: raw}}
+	}
+
+	// Old fold: mid turn 10, start known.
+	s := NewStore("http://x")
+	s.Sess("s1")
+	s.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Running: true, Cwd: "/w"}})
+	s.Event("s1", &protocol.SessionEvent{Type: "turn/start", Seq: 50, Time: now + 50,
+		Data: mustJSON(`{"turn":10}`)})
+	s.Event("s1", &protocol.SessionEvent{Type: "assistant/chunk", Seq: 51, Time: now + 51,
+		Data: mustJSON(`{"turn":10,"step":1,"chunk":{"type":"text","text":"x"}}`)})
+
+	// Tail spans turn 9's start+end and turn 10's chunks: the rebuild
+	// invalidates turn 9's start (attrTurn), the carry-over restores the
+	// turn-10 start the old fold knew.
+	s.LoadTail("s1", &protocol.HistoryResponse{Events: []protocol.HistoryEntry{
+		ev("turn/start", 30, map[string]any{"turn": 9}),
+		ev("turn/end", 31, map[string]any{"turn": 9, "reason": map[string]any{"kind": "completed"}}),
+		ev("assistant/chunk", 51, map[string]any{"turn": 10, "step": 1, "chunk": map[string]any{"type": "text", "text": "x"}}),
+	}})
+	if got := s.Get("s1").TurnStart.UnixMilli(); got != now+50 {
+		t.Fatalf("TurnStart = %d, want the turn-10 start %d", got, now+50)
+	}
+
+	// A newer turn's start inside the tail wins: no overwrite.
+	s2 := NewStore("http://x")
+	s2.Sess("s1")
+	s2.SetSessions([]protocol.SessionSummary{{SessionId: "s1", Running: true, Cwd: "/w"}})
+	s2.Event("s1", &protocol.SessionEvent{Type: "turn/start", Seq: 50, Time: now + 50,
+		Data: mustJSON(`{"turn":10}`)})
+	s2.LoadTail("s1", &protocol.HistoryResponse{Events: []protocol.HistoryEntry{
+		ev("turn/end", 60, map[string]any{"turn": 10, "reason": map[string]any{"kind": "completed"}}),
+		ev("turn/start", 61, map[string]any{"turn": 11}),
+	}})
+	if got := s2.Get("s1").TurnStart.UnixMilli(); got != now+61 {
+		t.Fatalf("TurnStart = %d, want the fresh turn-11 start %d", got, now+61)
 	}
 }
 

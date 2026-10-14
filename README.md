@@ -95,7 +95,7 @@ The `ctrl+n` model picker:
 **Sessions**
 
 - **Session window** (`ctrl+s`) — live search (title / id / content), switch, new, rename;
-- **Fork** (`f`) — branch a new session from where you're looking — the web's branch button, on the keyboard;
+- **Fork** (`ctrl+f`) — branch a new session from where you're looking — the web's branch button, on the keyboard;
 - **Resumes where you left off** — your last session and workspace are ready at boot.
 
 **Mouse & clipboard**
@@ -151,6 +151,7 @@ The `/status` window in the terminal (the table above, plus token usage stats):
 |---|---|
 | `enter` | Send (mid-turn = steer the agent) |
 | `shift+enter` | Insert a newline |
+| `ctrl+j` | Insert a newline (works on every terminal) |
 | `/` | Command menu, `tab` completes |
 | `esc` | Interrupt the turn / close popups / clear input |
 | `ctrl+n` | Pick a model (`←→` sets reasoning effort) |
@@ -158,8 +159,8 @@ The `/status` window in the terminal (the table above, plus token usage stats):
 | `ctrl+o` | Switch work mode |
 | `ctrl+w` | Manage workspaces |
 | `ctrl+s` | Session window (search / switch / new / rename) |
-| `f` | Fork a session at the view position (input empty) |
-| `ctrl+b` | Dock: todos / jobs / goal / queue (`1`–`4` switches tabs) |
+| `ctrl+f` | Fork a session at the view position (input empty) |
+| `ctrl+t` | Dock: todos / jobs / subagents / queue / goal (`ctrl+1`–`ctrl+5` switches tabs) |
 | `ctrl+e` | Toggle detail: full thinking, tool output (input empty) |
 | `ctrl+i` | Reopen a parked question / approval |
 | `ctrl+x` | Drop the oldest queued message |

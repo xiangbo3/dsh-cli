@@ -569,7 +569,10 @@ func renderAssistant(m *Model, it *core.Item, width int, label string) []string 
 					compactInt(int64(len(b.Text))), compactInt(int64(estimateTokens(b.Text))))))
 			} else {
 				out = append(out, th.Faint().Render(m.loc.T("transcript.thinking", th.Glyph.Thought)))
-				out = append(out, indentLines(wrapLines(b.Text, width-6), "    ")...)
+				// Reasoning is model prose: markdown-rendered in the faint
+				// voice, so lists and code inside a chain of thought read
+				// like the answer does, just quieter.
+				out = append(out, indentLines(m.mdRender(b.Text, width-6, th.CFaint), "    ")...)
 			}
 		case "tool":
 			if !usedHeader {
@@ -614,13 +617,14 @@ func renderToolCard(m *Model, tb *core.ToolBlock, width int) []string {
 		state += " " + textutil.HumanDuration(time.Duration(tb.DoneTime-tb.CallTime)*time.Millisecond)
 	}
 	// Flat spec line: "  ▸ name args …" with the state LED right-aligned
-	// like a product status readout.
+	// like a product status readout. The args render as the tool's
+	// human summary (the command, the path, the pattern), not raw JSON.
 	baseW := 2 + runewidth.StringWidth(th.Glyph.Tool) + 1 + runewidth.StringWidth(name)
 	args, argsW := "", 0
-	if tb.Args != "" {
+	if summary := toolSummary(name, tb.ArgsFull); summary != "" {
 		budget := width - 2 - runewidth.StringWidth(state) - 3
 		if avail := budget - baseW; avail >= 4 {
-			a := tb.Args
+			a := summary
 			if runewidth.StringWidth(a) > avail {
 				a = runewidth.Truncate(a, avail, "…")
 			}
@@ -637,16 +641,33 @@ func renderToolCard(m *Model, tb *core.ToolBlock, width int) []string {
 	}
 	line += strings.Repeat(" ", pad) + stateStyle().Render(state)
 	out := []string{line}
-	if pv := diffPreview(m, tb, width); len(pv) > 0 {
-		out = append(out, pv...)
-	}
-	if (m.verbose || tb == m.expandedTool) && tb.ResultText != "" {
-		res := strings.TrimRight(tb.ResultText, "\n")
-		if len(res) > 4000 {
-			res = textutil.Truncate(res, 3997, "…") + m.loc.T("transcript.truncated")
+	// The structured result card (read window, applied diff, search
+	// groups, citations) supersedes the arg-based diff preview: the
+	// preview is the plan, the meta is what happened.
+	structured := renderToolMeta(th, tb, width)
+	if len(structured) == 0 {
+		if pv := diffPreview(m, tb, width); len(pv) > 0 {
+			out = append(out, pv...)
 		}
-		res = strings.ReplaceAll(res, "\n", " ")
-		out = append(out, indentLines(plainLines(m, th.Faint(), res, width-5), "     ")...)
+	}
+	if m.verbose || tb == m.expandedTool {
+		switch {
+		case len(structured) > 0:
+			out = append(out, structured...)
+		case tb.ResultText != "":
+			res := strings.TrimRight(tb.ResultText, "\n")
+			if len(res) > 4000 {
+				res = textutil.Truncate(res, 3997, "…") + m.loc.T("transcript.truncated")
+			}
+			out = append(out, colorizeResult(th, res, width, tb.IsError)...)
+		}
+	}
+	// The code-family cards ride a slab: a surface sunk a shade under the
+	// page under the whole region, so a stretch of executed code is visible
+	// at a glance (a palette without a slab color leaves the lines on the
+	// page).
+	if isCodeTool(tb.Name) {
+		out = paintCodeSlab(th, out, width)
 	}
 	return out
 }
@@ -712,10 +733,14 @@ func renderTurnEnd(m *Model, it *core.Item) []string {
 			th.Warn().Render(m.loc.T("turnend.maxtokens", th.Glyph.Warn, tok)),
 			th.Faint().Render(m.loc.T("turnend.maxtokens.hint")),
 		}
+	case "forked":
+		// The turn ended because the session was forked from here: a
+		// faint marker, not an error.
+		return []string{th.Faint().Render(m.loc.T("turnend.forked", th.Glyph.Thought, dur, tok))}
 	default:
 		// Unknown protocol kind: the reason is the message — the raw kind
 		// is an English wire constant that must not leak into localized UI.
-		msg := it.TurnEnd.Reason
+		msg := it.TurnEnd.ReasonText()
 		if msg == "" && it.TurnEnd.Error != nil {
 			msg = it.TurnEnd.Error.Message
 		}

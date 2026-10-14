@@ -253,9 +253,10 @@ func frame(m *Model, title, hint string, body []string, w, h int) string {
 	clip := func(s string, width int) string {
 		return truncDisplay(s, width)
 	}
-	// The outline is a hairline (border color): the frame is chrome, the
-	// accent lives in the title bullet and the row bands inside.
-	edge := th.Border()
+	// The outline is a hairline in the card edge color — a step off the
+	// page beyond the panel it outlines. The frame is chrome: the accent
+	// lives in the title bullet and the row bands inside.
+	edge := th.CardEdge()
 	space := func(n int) string { return strings.Repeat(" ", n) }
 	pad := func(s string, width int) string {
 		if p := plainWidth(s); p < width {
@@ -906,15 +907,15 @@ type modelRow struct {
 }
 
 type modelPicker struct {
-	loading       bool
-	err           string
-	models        *protocol.SessionModels
-	rows          []modelRow
-	cur           int
-	effort        int // index into row.reasoning.Efforts (-1 = default)
-	loc           *i18n.Locale
-	fetching      bool
-	fetchNote     string // host message when a fetch came back empty/rejected
+	loading   bool
+	err       string
+	models    *protocol.SessionModels
+	rows      []modelRow
+	cur       int
+	effort    int // index into row.reasoning.Efforts (-1 = default)
+	loc       *i18n.Locale
+	fetching  bool
+	fetchNote string // host message when a fetch came back empty/rejected
 }
 
 // newModelPicker starts on the built-in face; the open site stamps the

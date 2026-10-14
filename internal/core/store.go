@@ -539,6 +539,12 @@ func (s *Store) LoadTail(id string, resp *protocol.HistoryResponse) {
 	}
 	fresh := st.T.MaxSeq() == 0 || len(st.T.Items) == 0
 	if fresh || last >= st.T.MaxSeq() {
+		// A long turn spills past the tail page: the rebuilt fold may not
+		// contain the current turn's turn/start. When the old fold knew
+		// the start of the very turn the rebuilt fold is mid-way through
+		// (or sees no turn number at all), carry it over so the elapsed
+		// readout survives the re-baseline instead of resetting to 0s.
+		oldAt, oldNum := st.T.TurnStartAt, st.T.TurnStartNum
 		st.T = NewTranscript()
 		for _, entry := range resp.Events {
 			st.T.Apply(&entry.Event)
@@ -549,6 +555,21 @@ func (s *Store) LoadTail(id string, resp *protocol.HistoryResponse) {
 				var d protocol.RequestContextData
 				if json.Unmarshal(entry.Event.Data, &d) == nil {
 					applyRequestContext(st, &d)
+				}
+			}
+		}
+		if oldAt > 0 && oldNum > 0 && st.T.TurnStartAt == 0 &&
+			(st.T.curTurn == 0 || st.T.curTurn == oldNum) {
+			st.T.TurnStartAt = oldAt
+			st.T.TurnStartNum = oldNum
+			if st.T.curTurn == 0 {
+				st.T.curTurn = oldNum
+			}
+			// The turn may have ended inside the tail page, its duration
+			// folded as 0 with the start lost: re-stamp that last row.
+			if n := len(st.T.Items); n > 0 {
+				if it := st.T.Items[n-1]; it.Kind == KindTurnEnd && it.TurnMs == 0 && it.Time > oldAt {
+					it.TurnMs = it.Time - oldAt
 				}
 			}
 		}
@@ -598,7 +619,7 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.Tok
 				st.Running = false
 				setSummary(st, func(s *protocol.SessionSummary) { s.Running = false })
 			}
-			info := &TurnEndInfo{Kind: d.Reason.Kind, Reason: textutil.StripTerminal(d.Reason.Reason), At: time.Now()}
+			info := &TurnEndInfo{Kind: d.Reason.Kind, Reason: textutil.StripTerminal(d.Reason.ReasonText()), At: time.Now()}
 			if ms := st.T.TurnStartAt; ms > 0 && info.Ms == 0 && ev.Time > ms {
 				info.Ms = ev.Time - ms
 			}
@@ -736,6 +757,21 @@ func (s *Store) MuxJobs(id string, jobs []protocol.JobView) {
 	st.Jobs = jobs
 	s.pushDirty()
 	s.mu.Unlock()
+}
+
+// ProjValue returns one stored projection value (nil when the session
+// or key is unknown).
+func (s *Store) ProjValue(id, key string) json.RawMessage {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := s.sessions[id]
+	if st == nil {
+		return nil
+	}
+	if pv, ok := st.proj[key]; ok {
+		return pv.V
+	}
+	return nil
 }
 
 // MuxProjection stores one projection value under higher-seq-wins.
@@ -1453,6 +1489,7 @@ type Row struct {
 	Title     string
 	Cwd       string
 	Parent    string
+	Origin    string // "subagent" for delegated child sessions ("" otherwise)
 	Fresh     bool
 	// Mode is the agent preset the session runs ("" when the deployment
 	// composes no presets, so the label stays off).
@@ -1483,7 +1520,8 @@ func (s *Store) rowLocked(st *Sess) Row {
 	r := Row{
 		Id: st.S.SessionId, UpdatedAt: st.S.UpdatedAt, Running: st.Running,
 		Blank: st.S.Blank, Title: s.titleLocked(st), Cwd: shortCwd(st.S.Cwd),
-		Parent: st.S.ParentSessionId, Fresh: st.fresh, Mode: st.S.AgentPreset,
+		Parent: st.S.ParentSessionId, Origin: st.S.Origin,
+		Fresh: st.fresh, Mode: st.S.AgentPreset,
 	}
 	if w := s.workspaceForSessionLocked(r.Id); w != nil {
 		r.WsID, r.WsTitle = w.WorkspaceId, w.Title
@@ -1837,7 +1875,7 @@ func planModeOn(m map[string]any) bool {
 
 func turnEndLevel(kind string) string {
 	switch kind {
-	case "completed":
+	case "completed", "forked":
 		return "ok"
 	case "interrupted", "aborted", "blocked":
 		return "warn"
@@ -1855,6 +1893,8 @@ func turnEndText(i *TurnEndInfo) string {
 		return "turn interrupted after " + dur
 	case "max-tokens":
 		return "turn stopped at max tokens"
+	case "forked":
+		return "turn forked after " + dur
 	default:
 		t := "turn ended: " + i.Kind
 		if i.Error != "" {

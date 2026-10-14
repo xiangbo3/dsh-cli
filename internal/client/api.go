@@ -168,9 +168,9 @@ func (c *Client) SettingsDescribe(ctx context.Context) (*protocol.SettingsDescri
 func (c *Client) SettingsMutate(ctx context.Context, ns string, ops []protocol.SettingOp) (*protocol.SettingNamespaceView, error) {
 	var v protocol.SettingNamespaceView
 	payload := struct {
-		Ns               string           `json:"ns"`
+		Ns               string               `json:"ns"`
 		Ops              []protocol.SettingOp `json:"ops"`
-		ExpectedRevision *int64           `json:"expectedRevision,omitempty"`
+		ExpectedRevision *int64               `json:"expectedRevision,omitempty"`
 	}{ns, ops, nil}
 	if err := c.call(ctx, "settings.mutate", payload, &v); err != nil {
 		return nil, err

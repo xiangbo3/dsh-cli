@@ -44,6 +44,10 @@ type Model struct {
 	// toast formatter reads it without holding the model.
 	loc    *i18n.Locale
 	locRef atomic.Pointer[i18n.Locale]
+	// verbCache is the rendered verb set (see layout.verbs): nine i18n
+	// lookups per frame add up, so the set is rebuilt only on a language
+	// switch.
+	verbCache []string
 
 	// Markdown pipelines per wrap width (LRU, see mdFor): a resize wobble
 	// must not rebuild the goldmark/glamour pipeline on every frame.
@@ -100,6 +104,7 @@ type Model struct {
 	lastTransWidth int
 	scroll         int // line offset from the top; clamped to [0, max(0,total-vh)]
 	transH         int // transcript pane height measured in the last frame (0: unmeasured)
+	mainH          int // main-area height measured in the last frame: popups stay inside it
 
 	sideVisible bool
 	// sideSearch is the session window's search line: the always-focussed
@@ -118,7 +123,6 @@ type Model struct {
 	// expandedTool: the tool card whose result is inlined (x/space peek),
 	// independent of the global verbose flag.
 	expandedTool *core.ToolBlock
-	subFetching  bool // one child-catalog fetch in flight
 
 	inp        *inputLine
 	mergedCmds []slashCmd
@@ -160,6 +164,9 @@ type Model struct {
 	// the next outage hints again.
 	hostDownSince  time.Time
 	hostDownHinted bool
+	// msgDbg is the DSH_MSG_DBG trace file (developer opt-in): opened
+	// once on the first message, owner-only.
+	msgDbg *os.File
 
 	// usage is the persistent token-usage statistics the /status popup
 	// renders (nil when the app attached no recorder: the popup shows
@@ -302,6 +309,7 @@ type modelsLoadedMsg struct {
 	// picker body shows the problem).
 	err string
 }
+
 // modelsFetchedMsg carries one provider's discovered models back to the
 // picker (err != "" when the endpoint refused or the network failed).
 type modelsFetchedMsg struct {
@@ -309,6 +317,7 @@ type modelsFetchedMsg struct {
 	models   []protocol.DiscoveredModel
 	err      string
 }
+
 // modelsRefreshMsg asks for a fresh catalog after a settings change.
 type modelsRefreshMsg struct {
 	id string
@@ -351,6 +360,22 @@ type pasteTextMsg struct{ text string }
 // Update case). reply is always buffered one; the test waits on it.
 type inputProbeMsg struct{ reply chan string }
 
+// KeyModesOn / KeyModesOff: the extended-key reports dsh-cli asks for at
+// boot and drops at exit. Both protocols are requested because terminals
+// split between them: XTerm modifyOtherKeys2 (ESC [ 27 ; mods ; sym ~,
+// xterm and foot) and the kitty keyboard protocol's disambiguate flag
+// (ESC [ > 1 u, kitty / wezterm / ghostty / foot / iTerm2, and what tmux
+// re-encodes to). Without the kitty push those terminals answer a bare CR
+// for shift+enter — indistinguishable from enter, so the line sends
+// instead of breaking. With it the key arrives as ESC [ 13 ; 2 u (or
+// ESC [ 27 ; 2 ; 13 ~), both decoded in Update. A terminal honouring
+// neither keeps sending one CR for both keys; there ctrl+j is the newline.
+// The kitty flag rides a stack, so the exit pops it.
+const (
+	KeyModesOn  = "\x1b[>4;2m\x1b[>1u"
+	KeyModesOff = "\x1b[>4m\x1b[<1u"
+)
+
 // Init starts the store pumps.
 func (m *Model) Init() tea.Cmd {
 	go func() {
@@ -370,14 +395,10 @@ func (m *Model) Init() tea.Cmd {
 	if !m.splashOff {
 		m.splashStart = time.Now()
 	}
-	// Ask the terminal to report modified keys via XTerm
-	// modifyOtherKeys2 (ESC [ 27 ; mods ; sym ~): on honouring
-	// terminals (foot, xterm, kitty) ctrl+shift+c/v then reach Update
-	// as distinct keys instead of plain ctrl+c/v; others ignore the
-	// mode and the legacy paths keep working. main resets it on exit
-	// so the next app in the terminal is not left decoding it.
+	// Ask the terminal for its extended-key reports; main resets them
+	// on exit so the next app in the terminal is not left decoding.
 	if m.prog != nil {
-		os.Stdout.WriteString("\x1b[>4;2m")
+		os.Stdout.WriteString(KeyModesOn)
 	}
 	// Bracketed paste is a command in the v1 reader (no program option):
 	// terminal pastes then arrive as KeyMsgs flagged Paste, folded into
@@ -625,6 +646,8 @@ func turnEndText(loc *i18n.Locale, i *core.TurnEndInfo) string {
 		return loc.T("notice.turn.interrupted", dur)
 	case "max-tokens":
 		return loc.T("notice.turn.maxtokens")
+	case "forked":
+		return loc.T("notice.turn.forked", dur)
 	default:
 		t := loc.T("notice.turn.ended", i.Kind)
 		if i.Error != "" {
@@ -669,10 +692,14 @@ func (m *Model) resetTrans() {
 
 // Update is the tea model update.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if p := os.Getenv("DSH_MSG_DBG"); p != "" {
-		if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+	if m.msgDbg != nil {
+		fmt.Fprintf(m.msgDbg, "%s %T %s\n", time.Now().Format("15:04.051"), msg, msg)
+	} else if p := os.Getenv("DSH_MSG_DBG"); p != "" {
+		// Open once: a per-message open+close is a syscall triplet per
+		// message, and the trace carries full message text (0600).
+		if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			m.msgDbg = f
 			fmt.Fprintf(f, "%s %T %s\n", time.Now().Format("15:04.051"), msg, msg)
-			f.Close()
 		}
 	}
 	switch msg := msg.(type) {
@@ -778,13 +805,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// bootIfNeeded may kick off the first tail load.
 		if c := m.bootIfNeeded(); c != nil {
 			cmds = append(cmds, c)
-		}
-		// Subs tab on screen: keep the child catalog fresh (the cache TTL
-		// alone would leave the tab on its last snapshot).
-		if m.dockVisible && m.dockTab == dockSubs {
-			if c := m.subDockRefresh(); c != nil {
-				cmds = append(cmds, c)
-			}
 		}
 		switch len(cmds) {
 		case 0:
@@ -903,26 +923,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		skillsCachePut(msg.id, msg.skills, msg.err)
 		m.skillsFetching = false
 		return m, m.refreshCmds()
-
-	case subagentsLoadedMsg:
-		// The child catalog landed; store it (negative cache included),
-		// clamp the dock cursor, and re-run the @ completion so the
-		// children appear on the next frame. A failed fetch keeps its
-		// previous rows: an RPC blip must not blank an open catalog.
-		ok := msg.err == nil
-		entries := msg.entries
-		if !ok && len(entries) == 0 {
-			if prev, had := subagentCache[msg.id]; had {
-				entries = prev.entries
-			}
-		}
-		subagentCache[msg.id] = subagentCacheEntry{at: time.Now(), entries: entries, ok: ok}
-		m.subFetching = false
-		m.clampSubDockCur()
-		if m.inp.atOpen {
-			return m, m.refreshAtMenu()
-		}
-		return m, nil
 
 	case subHistoryLoadedMsg:
 		// A child transcript page landed: fill the open window (if it is
@@ -1148,6 +1148,22 @@ func mok2Key(seq []byte) (tea.KeyMsg, bool) {
 	return modKey(mod, sym)
 }
 
+// keyCtrlDigit1..7 are sentinels for the ctrl+digit chords. Extended-key
+// terminals (kitty protocol, modifyOtherKeys, tmux re-encode) report these
+// unambiguously; the legacy control bytes fold ctrl+1 into ctrl+a, so those
+// terminals keep the editor's meaning and the dock simply stays unreachable.
+// Values sit far above every bubbletea KeyType (control bytes ≤ 0x7f, the
+// special keys are negative).
+const (
+	keyCtrlDigit1 = tea.KeyType(0x2000 + iota)
+	keyCtrlDigit2
+	keyCtrlDigit3
+	keyCtrlDigit4
+	keyCtrlDigit5
+	keyCtrlDigit6
+	keyCtrlDigit7
+)
+
 // modKey maps a (modifier, sym) pair to the key the legacy bytes would
 // have carried — the shared core of mok2Key and csiuKey. The
 // modifyOtherKeys modifier numbers (1 none, 2 shift, 3 alt, 4 alt+shift,
@@ -1261,14 +1277,20 @@ func modKey(mod, sym int) (tea.KeyMsg, bool) {
 	}
 	if sym >= 48 && sym <= 57 { // digits
 		b := sym - 48
-		if ctrl { // legacy ctrl+digit control bytes
+		if ctrl {
+			// ctrl+1..7 ride sentinels: kitty/MOK2 report them
+			// unambiguously, and folding them into the legacy control
+			// bytes would collide with ctrl+a..g (quit, verbose, the
+			// editor). ctrl+0/8/9 keep their legacy bytes (ctrl+@, BS, HT).
 			switch b {
+			case 0:
+				return tea.KeyMsg{Type: tea.KeyType(0), Alt: alt}, true
+			case 1, 2, 3, 4, 5, 6, 7:
+				return tea.KeyMsg{Type: keyCtrlDigit1 + tea.KeyType(b-1), Alt: alt}, true
 			case 8:
 				return tea.KeyMsg{Type: tea.KeyBackspace, Alt: alt}, true
-			case 9:
+			default: // 9
 				return tea.KeyMsg{Type: tea.KeyTab, Alt: alt}, true
-			default:
-				return tea.KeyMsg{Type: tea.KeyType(b), Alt: alt}, true
 			}
 		}
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune('0' + b)}, Alt: alt}, true
@@ -1288,6 +1310,7 @@ func (m *Model) handleShiftEnter() tea.Cmd {
 	if m.topModal() != nil || m.sideVisible {
 		return nil
 	}
+	m.inp.clampCaret()
 	m.inp.insertRune('\n')
 	return nil
 }
@@ -1677,9 +1700,11 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case km.Type == tea.KeyCtrlO && emptyInput:
 		return m, m.openModePicker()
-	case m.dockVisible && emptyInput && (km.String() == "1" || km.String() == "2" || km.String() == "3" || km.String() == "4" || km.String() == "5"):
-		// 1-5 jump to the tab at that visual position (left to right).
-		m.dockTab = dockTodos + (map[string]int{"1": 0, "2": 1, "3": 2, "4": 3, "5": 4}[km.String()])
+	case m.dockVisible && km.Type >= keyCtrlDigit1 && km.Type <= keyCtrlDigit5:
+		// ctrl+1..5 jump to the tab at that visual position (left to
+		// right). Plain digits type into the prompt; the ctrl chord has
+		// no editor meaning, so it works with text in the input too.
+		m.dockTab = dockTodos + int(km.Type-keyCtrlDigit1)
 		m.subDockCur = 0
 		return m, m.subDockRefresh()
 	case m.dockVisible && emptyInput && km.Type == tea.KeyLeft:
@@ -1702,7 +1727,7 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case m.dockVisible && m.dockTab == dockSubs && emptyInput && km.Type == tea.KeyDown:
-		if entries, _ := subagentEntries(m.activeID()); m.subDockCur < len(entries)-1 {
+		if entries := m.subagentEntries(m.activeID()); m.subDockCur < len(entries)-1 {
 			m.subDockCur++
 		}
 		return m, nil
@@ -1734,7 +1759,7 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case (km.Type == tea.KeyRunes && km.String() == "x" || km.Type == tea.KeySpace) && emptyInput && m.lastToolBlock() != nil:
 		// Peek at the newest tool card. Gated on a card existing so the
 		// first character typed into an empty input still lands in the
-		// editor (the f-fork contract, extended to the peek key).
+		// editor.
 		m.toggleToolExpand()
 		return m, nil
 	case (km.Type == tea.KeyCtrlU || km.Type == tea.KeyCtrlK) && emptyInput && m.activeID() != "":
@@ -1765,10 +1790,12 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// auto-repeat, a pasted 0x10 byte) does not flip the sandbox
 		// preset and stack "permission → …" toasts.
 		return m, m.cmdCyclePermission()
-	case km.String() == "f" && emptyInput && m.activeID() != "":
-		// Fork the active session at the view position (the web's branch
-		// button, keyboard-first): the cut is the last completed turn at
-		// or above the view — the newest one while the tail is pinned.
+	case km.Type == tea.KeyCtrlF && emptyInput && m.activeID() != "":
+		// ctrl+f forks the active session at the view position (the web's
+		// branch button, keyboard-first): the cut is the last completed
+		// turn at or above the view — the newest one while the tail is
+		// pinned. The empty-input gate keeps ctrl+f the editor's
+		// caret-forward while typing (a no-op on an empty bar).
 		id := m.activeID()
 		return m, m.cmdFork(id, m.forkAnchorSeq(id))
 	}
@@ -2726,6 +2753,7 @@ func (m *Model) loadLanguage(name string) tea.Cmd {
 	}
 	m.loc = loc
 	m.locRef.Store(loc)
+	m.verbCache = nil
 	m.resetTrans()
 	if cfg := config.Load(); cfg.Language != loc.Lang {
 		cfg.Language = loc.Lang
@@ -2995,25 +3023,17 @@ func (m *Model) toggleChord(km tea.KeyMsg) bool {
 	return false
 }
 
-// subDockRefresh fetches the child catalog when the subs tab needs it
-// (stale or missing), and clamps the cursor.
+// subDockRefresh keeps the subs-tab cursor inside the (store-derived)
+// child catalog. The catalog rides the store mirror, so there is nothing
+// to fetch.
 func (m *Model) subDockRefresh() tea.Cmd {
 	m.clampSubDockCur()
-	id := m.activeID()
-	if id == "" || m.subFetching {
-		return nil
-	}
-	if _, fresh := subagentEntries(id); !fresh {
-		m.subFetching = true
-		return m.cmdFetchSubagents(id)
-	}
 	return nil
 }
 
-// clampSubDockCur keeps the subs-tab cursor inside the cached rows.
+// clampSubDockCur keeps the subs-tab cursor inside the child catalog.
 func (m *Model) clampSubDockCur() {
-	id := m.activeID()
-	entries, _ := subagentEntries(id)
+	entries := m.subagentEntries(m.activeID())
 	if m.subDockCur >= len(entries) {
 		m.subDockCur = 0
 	}
@@ -3023,9 +3043,9 @@ func (m *Model) clampSubDockCur() {
 // cursor's child (subagent.history, one page, chronological).
 func (m *Model) openSubTranscript() tea.Cmd {
 	id := m.activeID()
-	// A stale catalog is fine here: the modal pulls its own history page,
-	// and the catalog only supplies the child's identity and label.
-	entries, _ := subagentEntries(id)
+	// The catalog is the store roster: the child's identity and label are
+	// current the moment the tab renders.
+	entries := m.subagentEntries(id)
 	if len(entries) == 0 || m.subDockCur >= len(entries) {
 		return nil
 	}
@@ -3046,7 +3066,7 @@ func (m *Model) openSubTranscript() tea.Cmd {
 // to stop).
 func (m *Model) interruptSub() tea.Cmd {
 	id := m.activeID()
-	entries, _ := subagentEntries(id)
+	entries := m.subagentEntries(id)
 	if len(entries) == 0 || m.subDockCur >= len(entries) {
 		return nil
 	}
@@ -3907,19 +3927,10 @@ func (m *Model) cmdFetchSkills(id string) tea.Cmd {
 }
 
 // The subagent catalog (running children) feeds the @ completion and the
-// dock roster, cached per session. A failed fetch keeps its previous rows
-// but is never fresh, so a blip cannot fake an empty list.
-const (
-	subagentsCacheTTL = 2 * time.Second
-)
-
-type subagentCacheEntry struct {
-	at      time.Time
-	entries []protocol.SubagentListEntry
-	ok      bool
-}
-
-var subagentCache = map[string]subagentCacheEntry{}
+// dock roster. It rides the store roster: the host lists child sessions
+// with their parent and running flag, and the mirror keeps both live — so
+// the catalog needs no fetch of its own (the old subagent.list RPC is not
+// part of the new-dialect host at all).
 
 // atMenuItem is one @ completion candidate: a running child's label or a
 // cwd-relative path (directories carry a trailing slash).
@@ -3929,29 +3940,51 @@ type atMenuItem struct {
 	Info string // dimmed suffix (activity / "dir")
 }
 
-// subagentEntries returns the cached child catalog (entries, fresh).
-func subagentEntries(id string) ([]protocol.SubagentListEntry, bool) {
-	e, ok := subagentCache[id]
-	if !ok {
-		return nil, false
+// subagentEntries derives one session's child catalog from the store
+// roster: the rows the host tags as its subagents. Activity follows the
+// live running flag; the label and mode come from the parent's
+// subagentCatalog projection (spawn-time facts), falling back to the
+// child's title and id.
+func (m *Model) subagentEntries(id string) []protocol.SubagentListEntry {
+	if id == "" {
+		return nil
 	}
-	// A failed fetch is never fresh: it may not claim "no children", and
-	// the pulse re-fetches on the normal cadence while the tab is open.
-	if !e.ok {
-		return e.entries, false
+	type catRow struct {
+		Id    string `json:"id"`
+		Mode  string `json:"mode"`
+		Label string `json:"label"`
 	}
-	if time.Since(e.at) > subagentsCacheTTL {
-		// Past the window the rows are stale, not gone: the dock and the
-		// @ menu keep showing the last catalog while the pulse re-fetches.
-		return e.entries, false
+	cat := map[string]catRow{}
+	if raw := m.st.ProjValue(id, "subagentCatalog"); len(raw) > 0 {
+		var rows []catRow
+		if json.Unmarshal(raw, &rows) == nil {
+			for _, c := range rows {
+				cat[c.Id] = c
+			}
+		}
 	}
-	return e.entries, true
-}
-
-type subagentsLoadedMsg struct {
-	id      string
-	entries []protocol.SubagentListEntry
-	err     error
+	var out []protocol.SubagentListEntry
+	for _, r := range m.st.Roster() {
+		if r.Parent != id || r.Origin != "subagent" {
+			continue
+		}
+		act := "inactive"
+		if r.Running {
+			act = "running"
+		}
+		e := protocol.SubagentListEntry{Kind: "child", Id: r.Id, Activity: act, Label: r.Title}
+		if c, ok := cat[r.Id]; ok {
+			e.Mode = c.Mode
+			if c.Label != "" {
+				e.Label = c.Label
+			}
+		}
+		if e.Mode == "" {
+			e.Mode = "continuable"
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 type subHistoryLoadedMsg struct {
@@ -3960,11 +3993,8 @@ type subHistoryLoadedMsg struct {
 	err    error
 }
 
-// cmdFetchSubagents pulls the active session's child catalog off the
-// event loop.
-// refreshAtMenu recomputes the @ completion from the current text: running
-// children first, then cwd paths under the token. It returns the fetch to
-// schedule when the child catalog is stale.
+// refreshAtMenu recomputes the @ completion from the current text: the
+// session's children first, then cwd paths under the token.
 func (m *Model) refreshAtMenu() tea.Cmd {
 	in := m.inp
 	pos, token := in.atToken()
@@ -3975,29 +4005,23 @@ func (m *Model) refreshAtMenu() tea.Cmd {
 	in.atPos = pos
 	id := m.activeID()
 	var items []atMenuItem
-	fresh := false
 	if id != "" {
-		// Stale rows still seed the menu (the fetch below re-syncs them);
-		// a cold cache waits for the fetch before children appear.
-		if entries, f := subagentEntries(id); f || len(entries) > 0 {
-			fresh = f
-			for _, e := range entries {
-				if e.Kind != "child" {
-					continue
-				}
-				label := e.Label
-				if label == "" {
-					label = e.Id
-				}
-				if !strings.HasPrefix(label, token) {
-					continue
-				}
-				info := ""
-				if e.Activity == "running" {
-					info = m.loc.T("at.running")
-				}
-				items = append(items, atMenuItem{Text: label, Kind: "child", Info: info})
+		for _, e := range m.subagentEntries(id) {
+			if e.Kind != "child" {
+				continue
 			}
+			label := e.Label
+			if label == "" {
+				label = e.Id
+			}
+			if !strings.HasPrefix(label, token) {
+				continue
+			}
+			info := ""
+			if e.Activity == "running" {
+				info = m.loc.T("at.running")
+			}
+			items = append(items, atMenuItem{Text: label, Kind: "child", Info: info})
 		}
 		if snap := m.st.Get(id); snap != nil {
 			for _, p := range atPaths(snap.Summary.Cwd, token) {
@@ -4015,10 +4039,6 @@ func (m *Model) refreshAtMenu() tea.Cmd {
 		if in.atCur >= len(items) {
 			in.atCur = len(items) - 1
 		}
-	}
-	if in.atOpen && id != "" && !fresh && !m.subFetching {
-		m.subFetching = true
-		return m.cmdFetchSubagents(id)
 	}
 	return nil
 }
@@ -4072,21 +4092,6 @@ func atPaths(root, token string) []string {
 		out = out[:50]
 	}
 	return out
-}
-
-func (m *Model) cmdFetchSubagents(id string) tea.Cmd {
-	return func() tea.Msg {
-		// 15s: the host walks its session roster for the catalog, which
-		// outruns a 5s budget on a loaded host and fakes an empty list.
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		cat, err := m.app.Client().Subagents(ctx, id)
-		var entries []protocol.SubagentListEntry
-		if cat != nil {
-			entries = cat.Entries
-		}
-		return subagentsLoadedMsg{id: id, entries: entries, err: err}
-	}
 }
 
 // The skill catalog is cached per session with a success TTL and a

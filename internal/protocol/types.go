@@ -216,8 +216,8 @@ type ConfigurableProvider struct {
 
 // SettingOp is one settings path op (a settings.mutate entry).
 type SettingOp struct {
-	Op   string   `json:"op"` // "set" | "unset"
-	Path []string `json:"path"`
+	Op    string   `json:"op"` // "set" | "unset"
+	Path  []string `json:"path"`
 	Value any      `json:"value,omitempty"`
 }
 
@@ -419,12 +419,17 @@ type MessageSource struct {
 	Form     string `json:"form,omitempty"` // context-injection form (snapshot|catalog|notice|...)
 }
 
-// Message is one immutable conversation message.
+// Message is one immutable conversation message. Content blocks are
+// text|reasoning|image|file|tool-call|tool-result (the last only from
+// older hosts; the current one puts toolCallId/isError on the tool
+// result message itself).
 type Message struct {
-	Id      string         `json:"id"`
-	Role    string         `json:"role"` // user|assistant|system
-	Content []ContentBlock `json:"content"`
-	Source  MessageSource  `json:"source"`
+	Id         string         `json:"id"`
+	Role       string         `json:"role"` // user|assistant|system|tool
+	Content    []ContentBlock `json:"content"`
+	ToolCallId string         `json:"toolCallId,omitempty"` // role=tool: the call this answers
+	IsError    bool           `json:"isError,omitempty"`    // role=tool: failed result
+	Source     MessageSource  `json:"source"`
 }
 
 // ---------------------------------------------------------------------------
@@ -440,8 +445,10 @@ type StreamChunk struct {
 	Id             string `json:"id,omitempty"`
 	Name           string `json:"name,omitempty"`
 	ArgumentsDelta string `json:"argumentsDelta,omitempty"`
-	// block-end / block-start
+	// block-end (older hosts also put the opening block here)
 	Block *ContentBlock `json:"block,omitempty"`
+	// block-start: the block kind the adapter opens with (current hosts)
+	BlockType string `json:"blockType,omitempty"`
 	// finish
 	Reason *FinishReason `json:"reason,omitempty"`
 	// usage: the step's token accounting (the adapter emits it before the
@@ -483,11 +490,27 @@ type TokenUsageHost struct {
 	CW  int `json:"cacheWriteTokens"`
 }
 
-// TurnEndReason is why a turn ended.
+// TurnEndReason is why a turn ended. Reason is a free string on older
+// hosts and a cause object ({kind: user|parent|hook|disposed|legacy}) on
+// current ones; ReasonText reads the printable half.
 type TurnEndReason struct {
-	Kind   string      `json:"kind"` // completed|aborted|blocked|error|max-tokens|interrupted
-	Reason string      `json:"reason,omitempty"`
-	Error  *LlmFailure `json:"error,omitempty"`
+	Kind   string          `json:"kind"` // completed|aborted|blocked|error|max-tokens|interrupted|forked
+	Reason json.RawMessage `json:"reason,omitempty"`
+	Error  *LlmFailure     `json:"error,omitempty"`
+}
+
+// ReasonText is the printable reason: a legacy string carries through,
+// the aborted cause object reads as empty (the UI has its own line for
+// an interrupted turn).
+func (r *TurnEndReason) ReasonText() string {
+	if r == nil || len(r.Reason) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(r.Reason, &s) == nil {
+		return s
+	}
+	return ""
 }
 
 // TodoItem is one agent todo entry.
@@ -534,8 +557,9 @@ type ToolResultEventData struct {
 	Step    int     `json:"step"`
 	Message Message `json:"message"`
 	Error   *struct {
-		Name string `json:"name"`
-		Code string `json:"code"`
+		Name   string `json:"name"`
+		Code   string `json:"code"`
+		Reason string `json:"reason,omitempty"` // user-facing failure reason
 	} `json:"error,omitempty"`
 	Meta json.RawMessage `json:"meta,omitempty"`
 }

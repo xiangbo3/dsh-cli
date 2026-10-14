@@ -36,6 +36,9 @@ import (
 type Locale struct {
 	Lang string
 	msgs map[string]string
+	// verbN pre-computes each template's Sprintf verb count (see
+	// computeVerbs): T runs per frame and must not pay a regex per call.
+	verbN map[string]int
 }
 
 // English returns the built-in locale: the program's default face and
@@ -43,7 +46,7 @@ type Locale struct {
 // leaves it behind). The stored ~/.dsh-cli/locales/en.json overrides it
 // as the English face when present (see Load); this table is also what
 // Boot regenerates the file from on first run.
-func English() *Locale { return &Locale{Lang: "en", msgs: en} }
+func English() *Locale { return &Locale{Lang: "en", msgs: en, verbN: enVerbs} }
 
 // Name renders the locale's display name for UI messages ("English",
 // "中文", the code title-cased for anything else).
@@ -82,6 +85,20 @@ var verbRe = regexp.MustCompile(`%[-+ #0]*(\d+)?(\.\d+)?([a-zA-Z])`)
 // countVerbs counts the Sprintf verbs a template consumes.
 func countVerbs(t string) int { return len(verbRe.FindAllString(t, -1)) }
 
+// computeVerbs pre-computes a table's verb counts (see Locale.verbN).
+func computeVerbs(m map[string]string) map[string]int {
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		out[k] = countVerbs(v)
+	}
+	return out
+}
+
+// The built-in tables' verb counts, computed once at init: the tables
+// are immutable, and T() is on the per-frame hot path.
+var enVerbs = computeVerbs(en)
+var zhVerbs = computeVerbs(zh)
+
 // T looks up key in the locale's table (then the built-in English
 // table, then the raw key) and renders it with args (Sprintf semantics;
 // an empty template means "hide the line"). A localized template may
@@ -91,14 +108,15 @@ func countVerbs(t string) int { return len(verbRe.FindAllString(t, -1)) }
 func (l *Locale) T(key string, args ...any) string {
 	t := ""
 	found := false
+	n := 0
 	if l != nil {
 		if v, ok := l.msgs[key]; ok {
-			t, found = v, true
+			t, found, n = v, true, l.verbN[key]
 		}
 	}
 	if !found {
 		if v, ok := en[key]; ok {
-			t, found = v, true
+			t, found, n = v, true, enVerbs[key]
 		}
 	}
 	if !found {
@@ -107,7 +125,7 @@ func (l *Locale) T(key string, args ...any) string {
 	if t == "" || len(args) == 0 {
 		return t
 	}
-	if n := countVerbs(t); n == 0 {
+	if n == 0 {
 		return t
 	} else if n < len(args) {
 		args = args[:n]
@@ -320,7 +338,7 @@ func Load(lang string) (*Locale, string, error) {
 			if b, err := os.ReadFile(p); err == nil {
 				msgs := map[string]string{}
 				if err := json.Unmarshal(b, &msgs); err == nil {
-					return &Locale{Lang: "en", msgs: msgs}, p, nil
+					return &Locale{Lang: "en", msgs: msgs, verbN: computeVerbs(msgs)}, p, nil
 				}
 			}
 		}
@@ -341,14 +359,14 @@ func Load(lang string) (*Locale, string, error) {
 			if err := json.Unmarshal(b, &msgs); err != nil {
 				continue // a broken file is skipped, the face never breaks
 			}
-			return &Locale{Lang: code, msgs: msgs}, p, nil
+			return &Locale{Lang: code, msgs: msgs, verbN: computeVerbs(msgs)}, p, nil
 		}
 	}
 	// Chinese, like English, has a built-in table as the final fallback:
 	// a missing or unreadable file degrades to the built-in Chinese face,
 	// not to English.
 	if c == "zh" {
-		return &Locale{Lang: "zh", msgs: zh}, "", nil
+		return &Locale{Lang: "zh", msgs: zh, verbN: zhVerbs}, "", nil
 	}
 	return nil, "", fmt.Errorf("no catalog for %q (looked in %s)", c, strings.Join(SearchDirs(), ", "))
 }

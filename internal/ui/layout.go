@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"dsh-cli/internal/config"
 	"dsh-cli/internal/core"
@@ -28,14 +29,23 @@ var verbKeys = []string{
 	"verb.weaving", "verb.simmering", "verb.computing", "verb.plotting",
 }
 
-// verbs is the running-state word set in the active language.
+// verbs is the running-state word set in the active language, cached
+// (rebuilt on a language switch, see verbCache).
 func (m *Model) verbs() []string {
-	out := make([]string, len(verbKeys))
-	for i, k := range verbKeys {
-		out[i] = m.loc.T(k)
+	if m.verbCache == nil {
+		out := make([]string, len(verbKeys))
+		for i, k := range verbKeys {
+			out[i] = m.loc.T(k)
+		}
+		m.verbCache = out
 	}
-	return out
+	return m.verbCache
 }
+
+// repaintMarker is the zero-width suffix every row carries on alternate
+// seconds: the renderer skips rows whose bytes are unchanged, so without it
+// a steady screen is painted once and a garbled row never heals.
+const repaintMarker = "\x1b[0m"
 
 // View renders the whole frame: a flat top bar over a hairline rule, the
 // pane area (transcript / dock separated by gutters), a centered session
@@ -91,6 +101,7 @@ func (m *Model) View() string {
 	if mainH < 1 {
 		mainH = 1 // pathological window: top bar + input deck survive
 	}
+	m.mainH = mainH // popups size and park against the main area, never the deck
 	// Publish the transcript pane origin for mouse mapping (the
 	// transcript keeps column 0: the session list floats as a centered
 	// popup, not a column).
@@ -135,16 +146,15 @@ func (m *Model) View() string {
 	// card slab — every cell the window covers carries the card surface
 	// or its own band), and the underlying frame row's content keeps
 	// showing in the margins on either side.
-	if m.sideVisible {
+	if m.sideVisible && mainH >= 3 {
 		ww, wh := m.sessionWindowSize()
 		win := strings.Split(m.sideView(ww, wh), "\n")
 		ox := (m.W - ww) / 2
-		oy := (m.H - wh) / 2
+		// Parked inside the main area: the deck below the bottom rule
+		// stays visible and uncovered.
+		oy := 2 + (mainH-wh)/2
 		if ox < 0 {
 			ox = 0
-		}
-		if oy < 0 {
-			oy = 0
 		}
 		for i, ln := range win {
 			if y := oy + i; y < len(lines) {
@@ -157,7 +167,7 @@ func (m *Model) View() string {
 	// window: the box's opaque cells take their columns (its interior
 	// is a solid card slab), and the underlying row's content keeps
 	// showing in the margins on either side.
-	if mod := m.topModal(); mod != nil {
+	if mod := m.topModal(); mod != nil && mainH >= 4 {
 		box, ox, oy, bw, _ := m.modalBox(mod)
 		for i, ln := range strings.Split(box, "\n") {
 			if y := oy + i; y < len(lines) {
@@ -172,6 +182,20 @@ func (m *Model) View() string {
 	for i, ln := range lines {
 		lines[i] = fillRowWidth(ln, m.W)
 	}
+	// The renderer's line diff skips rows whose bytes are unchanged, so a
+	// steady frame is painted once and then never touched again: whatever
+	// garbles or eats screen rows — a row the terminal wraps, a stray
+	// control byte, a redraw glitch — sits there until a resize forces a
+	// full repaint. Mark every row on alternate seconds, so once a second
+	// the whole frame is drawn again. The top bar's clock changes on the
+	// same beat, so the frame flushes then anyway: rows are rewritten in
+	// place, with no erase and no flicker.
+	if m.now.Unix()%2 == 1 {
+		for i := range lines {
+			lines[i] += repaintMarker
+		}
+	}
+
 	// The renderer drops an over-tall frame from the top, which would eat
 	// the top bar. The budget math above already guarantees the frame
 	// fits; this clamps the tail on a layout regression instead.
@@ -232,6 +256,10 @@ func (m *Model) topBar(w int) string {
 		if snap := m.st.Get(id); snap != nil {
 			if snap.Title != "" {
 				title = snap.Title
+			} else {
+				// A session without a title yet is the new session, not
+				// "no session": /new must visibly land on it.
+				title = m.loc.T("top.newsession")
 			}
 			if p := snap.Summary.AgentPreset; p != "" {
 				mode = modes.Label(p)
@@ -240,7 +268,10 @@ func (m *Model) topBar(w int) string {
 	}
 	nameVer := th.Faint().Render("dsh-cli " + version.Version)
 	compose := func(t string) string {
-		l := th.Accent().Render(th.Glyph.Zap) + " " + th.Plain().Render(t)
+		l := th.Accent().Render(th.Glyph.Zap)
+		if t != "" {
+			l += " " + th.Plain().Render(t)
+		}
 		if mode != "" {
 			l += " " + th.Subtle().Render("· "+mode)
 		}
@@ -318,9 +349,9 @@ func (m *Model) topBar(w int) string {
 	if plainWidth(right) > rightW {
 		right = truncDisplay(right, rightW)
 	}
-	return left + strings.Repeat(" ", leftW-plainWidth(left)) + " " +
+	return left + strings.Repeat(" ", maxInt(0, leftW-plainWidth(left))) + " " +
 		th.Faint().Render(clock) + " " +
-		strings.Repeat(" ", rightW-plainWidth(right)) + right
+		strings.Repeat(" ", maxInt(0, rightW-plainWidth(right))) + right
 }
 
 // miniView keeps the persistent top bar alive when the window is too small
@@ -360,14 +391,14 @@ func (m *Model) topStatus() string {
 			// with a stale elapsed time.
 			if snap.Running {
 				verbs := m.verbs()
-				frame := th.Glyph.Spinner[frameIdx(m.now)]
 				verb := verbs[m.verbIdx()]
 				elapsed := "0s"
 				if !snap.TurnStart.IsZero() {
 					elapsed = textutil.HumanDuration(time.Since(snap.TurnStart))
 				}
-				return th.Accent().Render(frame) + " " + m.sweepText(verb+"…") + " " +
-					th.Faint().Render(elapsed)
+				// No spinner glyph: the verb and its elapsed time carry
+				// the running state on their own.
+				return m.sweepText(verb+"…") + " " + th.Faint().Render(elapsed)
 			}
 			if snap.Flash != nil && time.Since(snap.Flash.At) < 6*time.Second {
 				return m.turnFlash(snap.Flash)
@@ -657,44 +688,40 @@ func (m *Model) sideNavIDs() []string {
 	return out
 }
 
-// sessionWindowSize is the popup's size (crush's dialog caps: at most
-// 70 wide, 20 tall), clamped to the screen with a one-cell margin and a
-// floor small enough to hold the frame chrome.
-func (m *Model) sessionWindowSize() (w, h int) {
-	w = m.W - 2
-	if w > 70 {
-		w = 70
-	}
+// popupWidth is the shared popup width: about 60% of the screen, so
+// dialogs scale with the window instead of stopping at a fixed cap, with
+// a floor small enough to hold the frame chrome.
+func (m *Model) popupWidth() int {
+	w := (m.W - 2) * 3 / 5
 	if w < 14 {
 		w = 14
 	}
-	h = m.H - 2
-	if h > 20 {
-		h = 20
+	return w
+}
+
+// sessionWindowSize is the popup's size: ~60% of the screen width and of
+// the main area's height (never the input deck), floored to hold the
+// frame chrome.
+func (m *Model) sessionWindowSize() (w, h int) {
+	w = m.popupWidth()
+	h = m.mainH * 3 / 5
+	if h < 3 {
+		h = 3
 	}
-	if h < 6 {
-		h = 6
+	if h > m.mainH {
+		h = m.mainH
 	}
 	return w, h
 }
 
-// modalBoxSize is the modal popup box's size (crush's dialog caps: at
-// most 70 wide, 20 tall), clamped to the screen with a one-cell margin
-// and a floor that holds the chrome (frame border + title + hint + at
-// least one body row). It returns the outer width and the body height
-// budget (h-4: frame border rows, title and hint).
+// modalBoxSize is the modal popup box's size (~60% of the screen width
+// and of the main area's height, never the input deck), floored to hold
+// the chrome (frame border + title + hint + at least one body row). It
+// returns the outer width and the body height budget (h-4: frame border
+// rows, title and hint).
 func (m *Model) modalBoxSize() (w, budget int) {
-	w = m.W - 2
-	if w > 70 {
-		w = 70
-	}
-	if w < 14 {
-		w = 14
-	}
-	budget = m.H - 6
-	if budget > 16 {
-		budget = 16
-	}
+	w = m.popupWidth()
+	budget = m.mainH*3/5 - 4
 	if budget < 1 {
 		budget = 1
 	}
@@ -720,11 +747,14 @@ func (m *Model) modalBox(mod modal) (box string, ox, oy, bw, bh int) {
 	w, budget := m.modalBoxSize()
 	body := mod.view(m, m.modalInnerWidth(), budget)
 	bh = 4 + len(body)
-	if bh < 6 {
-		bh = 6
+	if bh < 4 {
+		bh = 4
 	}
 	if bh > budget+4 {
 		bh = budget + 4
+	}
+	if bh > m.mainH {
+		bh = m.mainH
 	}
 	box = frame(m, mod.title(), mod.hint(), body, w, bh)
 	// Whole-row paste (the session window's convention): the box origin
@@ -737,9 +767,11 @@ func (m *Model) modalBox(mod modal) (box string, ox, oy, bw, bh int) {
 	if ox < 0 {
 		ox = 0
 	}
-	oy = (m.H - bh) / 2
-	if oy < 0 {
-		oy = 0
+	// Parked inside the main area (rows [2, 2+mainH)): the pinned deck
+	// below the bottom rule is never covered.
+	oy = 2 + (m.mainH-bh)/2
+	if oy < 2 {
+		oy = 2
 	}
 	return box, ox, oy, w, bh
 }
@@ -928,6 +960,14 @@ func (m *Model) sideView(w, h int) string {
 	}
 
 	content = append(content, rowsList...)
+	if maxBody := h - 2 - 1; len(content) > maxBody {
+		// A window shorter than its fixed rows: clip the body so the
+		// footer stays on the last row and the frame is exactly h tall.
+		if maxBody < 0 {
+			maxBody = 0
+		}
+		content = content[:maxBody]
+	}
 	for n := len(content); n < h-2-1; n++ {
 		// Blank tail between the last row and the footer: the card slab
 		// fills it (cardLine gives these rows their surface).
@@ -942,14 +982,15 @@ func (m *Model) sideView(w, h int) string {
 	}
 	content = append(content, th.Faint().Render(pad(hint, inner)))
 
-	// The rounded hairline frame (crush's dialog border, border color:
-	// the frame is chrome, the accent lives in the title, the rail and
-	// the pick band inside), drawn by hand over the card surface:
+	// The rounded hairline frame (in the card edge color, so the outline
+	// reads on the panel it borders: the frame is chrome, the accent lives
+	// in the title, the rail and the pick band inside), drawn by hand over
+	// the card surface:
 	// cardLine merges the card background into every cell the line
 	// leaves without one — border cells, title row, gaps, blank tail,
 	// footer — so the window's interior is a solid slab and nothing of
 	// the screen shows through it.
-	edge := th.Border()
+	edge := th.CardEdge()
 	card := th.CardState()
 	var out []string
 	out = append(out, cardLine(edge.Render("╭"+strings.Repeat("─", w-2)+"╮"), card))
@@ -1202,7 +1243,17 @@ func (m *Model) updateTermTitle() {
 	if m.running() {
 		mark = "●"
 	}
-	t := mark + " " + textutil.StripANSI(name)
+	// The title rides an OSC straight to the tty. A control rune in a
+	// model-authored title (a BEL, an ESC, a newline) would cut the
+	// sequence short and print the rest at the cursor — the bottom of the
+	// screen, over the deck — and the diffing renderer never redraws those
+	// rows. Keep it one line of printable runes.
+	t := mark + " " + strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, textutil.StripANSI(name))
 	if t == m.termTitle {
 		return
 	}
@@ -1508,14 +1559,10 @@ func (m *Model) dockView(w, h int) string {
 				body = append(body, truncDisplay(fmt.Sprintf("  %d. [%s] %s", i+1, q.Placement, text), w-2))
 			}
 		case dockSubs:
-			// A stale catalog still renders its last rows (the dirty pulse
-			// re-fetches while the tab is on screen); loading… is only for
-			// the cold first page.
-			entries, fresh := subagentEntries(id)
-			if len(entries) == 0 && !fresh {
-				body = append(body, "  "+th.Faint().Render(m.loc.T("dock.subs.loading")))
-				break
-			}
+			// The catalog rides the store roster (the host lists children
+			// with their parent and running flag), so it is live the moment
+			// the tab opens — no fetch, no loading state.
+			entries := m.subagentEntries(id)
 			if len(entries) == 0 {
 				body = append(body, "  "+m.loc.T("dock.no.subs"))
 				break
@@ -1635,7 +1682,12 @@ func fitWidth(s string, w int) string {
 		return b + strings.Repeat(" ", w-pw)
 	}
 	// Clip: re-emit only the cells that fit (the walk stops at the edge).
-	b, _ := emitCells(scanStyled(s), w)
+	// The cut line closes its state as well: a background live at the pane
+	// edge would ride the gutter, the neighbor column and the next row.
+	b, tail := emitCells(scanStyled(s), w)
+	if !tail.empty() {
+		b += "\x1b[0m"
+	}
 	return b
 }
 
@@ -1742,8 +1794,25 @@ func plainWidth(s string) int {
 // truncated well before its true width — the dock's job line went to
 // "  ◐ running  …" inside a budget it actually fit.
 func truncDisplay(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
 	if plainWidth(s) <= w {
 		return s
+	}
+	// The ellipsis is an East-Asian-ambiguous rune: runewidth counts it as
+	// two cells where the terminal does too. Budgeting one column for it
+	// let the result overrun by a cell (the top bar's pad then went
+	// negative and strings.Repeat panicked), so budget its real width —
+	// and when it does not fit at all, cut without one.
+	ew := runewidth.RuneWidth('…')
+	if ew < 1 {
+		ew = 1
+	}
+	ellipsis := ew <= w
+	limit := w
+	if ellipsis {
+		limit = w - ew
 	}
 	cells := scanStyled(s)
 	var b strings.Builder
@@ -1751,8 +1820,8 @@ func truncDisplay(s string, w int) string {
 	started := false
 	last := sgrState{}
 	for _, c := range cells {
-		// Leave the final column for the ellipsis.
-		if c.col+c.w > w-1 {
+		// Leave the ellipsis's columns for the ellipsis.
+		if c.col+c.w > limit {
 			break
 		}
 		if !started {
@@ -1772,7 +1841,9 @@ func truncDisplay(s string, w int) string {
 	// A live tail state is closed before the return: the truncated line is
 	// a self-contained unit, and an open state would otherwise bleed into
 	// the next frame line the renderer writes right after it.
-	b.WriteRune('…')
+	if ellipsis {
+		b.WriteRune('…')
+	}
 	if !last.empty() {
 		b.WriteString("\x1b[0m")
 	}
