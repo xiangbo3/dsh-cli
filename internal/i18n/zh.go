@@ -17,7 +17,6 @@ var zh = map[string]string{
 	"addmodel.hint":             "  已勾选 %d 个 · ↑↓ 选择 · space 切换 · enter 添加 · esc 关闭",
 	"addmodel.title":            "添加模型 · %s",
 	"approval.hint":             "  a/enter 允许一次 · d/esc 拒绝",
-	"approval.hint.armed":       "  再按 a 确认允许 · d 取消",
 	"approval.title":            "工具审批 — ",
 	"auth.needed":               "dsh web 需要启动 token——复制它打印的 ?token=… 链接，运行：dsh-cli --token <token>",
 	"auth.stale":                "已保存的启动 token 被拒——dsh web 可能已重启，用它新打印的 ?token=… 链接运行：dsh-cli --token <token>",

@@ -5,6 +5,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 
 	"dsh-cli/internal/protocol"
 )
@@ -186,13 +187,28 @@ func (c *Client) SelectModel(ctx context.Context, sessionId, provider, model, re
 		Model           string `json:"model"`
 		ReasoningEffort string `json:"reasoningEffort,omitempty"`
 	}{sessionId, provider, model, reasoningEffort}
-	var v struct {
-		Selected protocol.ModelSelection `json:"selected"`
-	}
-	if err := c.call(ctx, protocol.MSessionSelectModel, payload, &v); err != nil {
+	// Two shapes answer: a bare selection (the upgrade shim unwraps the
+	// new host's {"selected":…} into it) or the wrapped one. Accept both,
+	// and treat an echo that names no model as "nothing to report" — the
+	// callers keep the pick they asked for rather than blanking the
+	// readout with an empty selection.
+	var raw json.RawMessage
+	if err := c.call(ctx, protocol.MSessionSelectModel, payload, &raw); err != nil {
 		return nil, err
 	}
-	return &v.Selected, nil
+	var sel protocol.ModelSelection
+	if json.Unmarshal(raw, &sel) != nil || sel.Model == "" {
+		var wrap struct {
+			Selected protocol.ModelSelection `json:"selected"`
+		}
+		if json.Unmarshal(raw, &wrap) == nil {
+			sel = wrap.Selected
+		}
+	}
+	if sel.Model == "" {
+		return nil, nil
+	}
+	return &sel, nil
 }
 
 // Rename pins an explicit session title.

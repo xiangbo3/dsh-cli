@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.54
+
+### Fixed
+
+- The host's auto-generated checkpoint ("This is an incomplete
+  conversation…") no longer appears in the conversation as a message.
+- An approval now answers on the first key: shell tools stopped asking
+  for a second confirming press.
+- Switching models finally sticks — the readout shows the model you
+  picked, and keeps it after a re-attach or restart.
+- The t/s readout shows the model's decode speed (tokens over the time
+  spent generating them, the web client's measure) instead of averaging
+  in thinking time and idle gaps.
+
+### 修复
+
+- 主机自动生成的检查点提示（"This is an incomplete conversation…"）
+  不再作为对话消息显示。
+- 确认消息按一次键即作出回应：工具执行不再要求再按一次确认。
+- 切换模型真正生效——状态栏显示所选模型，重连与重启后依然保持。
+- 右下角 t/s 改为模型解码速度（按生成这些 token 实际花费的时间计算，
+  与网页端一致），不再把思考与空闲时间算入平均。
+
 ## 1.0.53
 
 ### Added

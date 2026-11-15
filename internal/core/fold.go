@@ -144,16 +144,22 @@ type Transcript struct {
 	TurnTokens   TurnTokens
 	TurnActive   bool
 	// Recent holds the server's token-generation samples (one per
-	// assistant message, output at arrival), rolling over GenWindow —
+	// assistant step, output at arrival), rolling over GenWindow —
 	// the status bar's t/s readout averages these.
 	Recent []GenSample
+	// stepFirstAt is the unix ms of the in-flight step's first token
+	// delta: the decode window's start, so prefill/TTFT stays out of it.
+	stepFirstAt int64
 }
 
 // GenSample is one point of the server's token generation: the output
-// tokens an assistant message carried, at the time it arrived.
+// tokens an assistant step carried, at the time it arrived, over the
+// DecodeMs they took to decode (0 when the step was replayed and its
+// first token was never seen — such a sample yields no rate).
 type GenSample struct {
-	At  int64 // unix milliseconds
-	Out int
+	At       int64 // unix milliseconds
+	Out      int
+	DecodeMs int64
 }
 
 // GenWindow bounds the rolling window of generation samples (the
@@ -328,6 +334,7 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		if !(t.streaming && t.curTurn == d.Turn && t.curStep == d.Step) {
 			t.streamUsage = nil
 			t.streamSampled = false
+			t.stepFirstAt = 0
 		}
 		t.finalizeStreaming()
 		t.attrTurn(d.Turn)
@@ -561,11 +568,14 @@ func (t *Transcript) Prepend(events []*protocol.SessionEvent) {
 // contextInjection reports whether a user message is a model-facing context
 // injection rather than a user utterance. Injections arrive as user/message
 // events: context forms (the runtime-context snapshot, the skill catalog)
-// carry source.form, and plugin notices (the user-approval policy-change
-// messages, compaction summaries) carry source.kind "plugin". Real user
-// sends are kind "user".
+// carry source.form, plugin notices (the user-approval policy-change
+// messages, compaction summaries) carry source.kind "plugin", and a
+// compaction checkpoint carries "compact-checkpoint" — hidden like the
+// others (the compaction notice already announced the replacement). Real
+// user sends are kind "user".
 func contextInjection(m *protocol.Message) bool {
-	return m.Source.Kind == "plugin" || m.Source.Form != ""
+	k := m.Source.Kind
+	return k == "plugin" || k == "compact-checkpoint" || m.Source.Form != ""
 }
 
 // bumpToolItems re-marks every item that displays the (mutated) shared tool
@@ -671,6 +681,7 @@ func (t *Transcript) beginStreaming(turn, step int) bool {
 	t.streamPending = 0
 	t.streamPubAt = 0
 	t.lastChunkAt = 0
+	t.stepFirstAt = 0
 	return true
 }
 
@@ -737,7 +748,7 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 			addUsageDelta(&t.TurnTokens, t.streamUsage, c.Usage)
 			t.streamUsage = c.Usage
 			if !t.streamSampled && c.Usage.OutputTokens > 0 {
-				t.addGenSample(time, c.Usage.OutputTokens)
+				t.addGenSample(time, c.Usage.OutputTokens, t.stepFirstAt)
 				t.streamSampled = true
 			}
 		}
@@ -749,6 +760,9 @@ func (t *Transcript) applyChunk(c protocol.StreamChunk, time int64) {
 	}
 	switch c.Type {
 	case "text-delta", "reasoning-delta", "tool-call-delta":
+		if t.stepFirstAt == 0 {
+			t.stepFirstAt = time // the decode window opens at the step's first token
+		}
 		// Coalesce: a delta alone does not rebuild the item.
 		t.streamPending++
 		t.lastChunkAt = time
@@ -875,7 +889,7 @@ func (t *Transcript) buildAssistantItem(m *protocol.Message, usage *protocol.Tok
 		addUsageDelta(&t.TurnTokens, t.streamUsage, usage)
 	}
 	if usage != nil && usage.OutputTokens > 0 && !t.streamSampled {
-		t.addGenSample(time, usage.OutputTokens)
+		t.addGenSample(time, usage.OutputTokens, t.stepFirstAt)
 		t.streamSampled = true
 	}
 	t.streamUsage = nil
@@ -945,11 +959,16 @@ func addUsageDelta(tt *TurnTokens, prev, next *protocol.TokenUsage) {
 	tt.Cache += dCache
 }
 
-// addGenSample records one assistant message's output tokens (the
-// server's generation, as distinct from the input it was served) and
-// prunes samples that have fallen out of the rolling window.
-func (t *Transcript) addGenSample(at int64, out int) {
-	t.Recent = append(t.Recent, GenSample{At: at, Out: out})
+// addGenSample records one assistant step's output tokens (the server's
+// generation, as distinct from the input it was served) over the decode
+// window that produced them (firstTokenAt..at; 0 when the first token was
+// never observed) and prunes samples out of the rolling window.
+func (t *Transcript) addGenSample(at int64, out int, firstTokenAt int64) {
+	var decode int64
+	if firstTokenAt > 0 && at > firstTokenAt {
+		decode = at - firstTokenAt
+	}
+	t.Recent = append(t.Recent, GenSample{At: at, Out: out, DecodeMs: decode})
 	cut := at - GenWindow.Milliseconds()
 	i := 0
 	for i < len(t.Recent) && t.Recent[i].At < cut {

@@ -1,10 +1,9 @@
 {
-  "_version": "1.0.53",
+  "_version": "1.0.54",
   "addmodel.adding": "  adding…",
   "addmodel.hint": "  %d checked · ↑↓ select · space toggle · enter add · esc close",
   "addmodel.title": "add models · %s",
   "approval.hint": "  a/enter allow once · d/esc reject",
-  "approval.hint.armed": "  a again to confirm allow · d to back out",
   "approval.title": "tool approval — ",
   "at.child": "subagent",
   "at.dir": "dir",

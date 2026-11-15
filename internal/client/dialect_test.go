@@ -29,6 +29,8 @@ type fakeNewHost struct {
 	mu      sync.Mutex
 	argLog  []string // "<method> <args-json>" per unary hit
 	pageSeq int64    // the session log tail seq the page endpoint sees
+
+	selectModel any // the session/selectModel reply (default: {})
 }
 
 func newFakeNewHost(t *testing.T, token string) *fakeNewHost {
@@ -172,6 +174,14 @@ func (f *fakeNewHost) unary(w http.ResponseWriter, env protocol.Envelope, r *htt
 	switch env.Method {
 	case "session/modelCatalog":
 		value = map[string]any{"default": map[string]any{"provider": "deepseek", "model": "chat"}}
+	case "session/selectModel":
+		f.mu.Lock()
+		v := f.selectModel
+		f.mu.Unlock()
+		if v == nil {
+			v = map[string]any{}
+		}
+		value = v
 	case "session/canOpenWorkspacePath":
 		value = true
 	case "session/list":

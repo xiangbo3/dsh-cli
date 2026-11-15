@@ -1,10 +1,9 @@
 {
-  "_version": "1.0.53",
+  "_version": "1.0.54",
   "addmodel.adding": "  正在添加…",
   "addmodel.hint": "  已勾选 %d 个 · ↑↓ 选择 · space 切换 · enter 添加 · esc 关闭",
   "addmodel.title": "添加模型 · %s",
   "approval.hint": "  a/enter 允许一次 · d/esc 拒绝",
-  "approval.hint.armed": "  再按 a 确认允许 · d 取消",
   "approval.title": "工具审批 — ",
   "at.child": "子代理",
   "at.dir": "目录",

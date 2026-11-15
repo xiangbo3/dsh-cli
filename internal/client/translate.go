@@ -297,11 +297,17 @@ func newValue(method string, value []byte) ([]byte, error) {
 			Failures: p.Failures,
 		})
 	case "session.selectModel":
+		// The upgraded host answers {"selected":{…}}; hand the caller the
+		// selection inside it. An answer that is already a bare selection
+		// passes through untouched rather than collapsing to an empty one.
 		var p struct {
-			Selected protocol.ModelSelection `json:"selected"`
+			Selected *protocol.ModelSelection `json:"selected"`
 		}
 		if err := json.Unmarshal(value, &p); err != nil {
 			return nil, err
+		}
+		if p.Selected == nil {
+			return value, nil
 		}
 		return json.Marshal(p.Selected)
 	case "agentPreset.select":

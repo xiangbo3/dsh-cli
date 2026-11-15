@@ -182,7 +182,7 @@ type Model struct {
 	// lastGenRate caches each session's last computed generation rate
 	// (t/s): when the generation window drains (idle), the status bar's
 	// readout keeps the last value instead of going off.
-	lastGenRate map[string]int
+	lastGenRate map[string]float64
 
 	booted bool
 	// bootWsChecked closes the boot auto workspace switch: once the
@@ -240,7 +240,7 @@ func NewModel(a *app.App) *Model {
 		openedInter: map[string]bool{},
 		loc:         loc,
 		usage:       a.Usage(),
-		lastGenRate: map[string]int{},
+		lastGenRate: map[string]float64{},
 		follow:      true,
 		transDirty:  true, // first frame renders from a cold cache
 	}
@@ -3613,21 +3613,6 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 	case *approvalModal:
 		allow := km.Type == tea.KeyEnter || km.Type == tea.KeyCtrlA ||
 			km.Type == tea.KeyRunes && km.String() == "a"
-		// bash-family commands take a second confirming allow: the first
-		// a arms (the hint flips), the second a fires; a stray key
-		// disarms. Non-shell approvals decide on the first key.
-		if allow && mod.bashLike() {
-			if mod.armed {
-				mod.armed = false
-			} else {
-				mod.armed = true
-				return nil, false // armed, still open: absorbed by the rule below
-			}
-		}
-		if !allow && mod.armed {
-			mod.armed = false
-			return nil, false // a stray key while armed: just disarmed
-		}
 		decide := "rejected"
 		if allow {
 			decide = "allowed-once"

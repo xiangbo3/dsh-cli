@@ -225,7 +225,6 @@ var en = map[string]string{
 	// ---- approval & question modals
 	"approval.title":      "tool approval — ",
 	"approval.hint":       "  a/enter allow once · d/esc reject",
-	"approval.hint.armed": "  a again to confirm allow · d to back out",
 	"question.title":      "question %d/%d",
 	"question.hint":       "  ↑↓ option · space mark · ←→ question · enter answer · esc close",
 	"question.plan":       "  plan review — ",

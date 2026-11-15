@@ -272,10 +272,11 @@ func TestStatusTitleAndHint(t *testing.T) {
 }
 
 // TestStatusBarGenRate pins the status bar's t/s readout (the recent
-// server-side generation average, after the tokens line): the output
-// tokens recorded in the recent window over that window's active span,
-// tracked across the turn boundary, kept (the last rate) once the window
-// empties, and off before anything was generated.
+// server-side decode speed, after the tokens line): the output tokens of
+// every in-window step over the decode time that produced them, so
+// prefill and the idle gaps between turns stay out of the figure; tracked
+// across the turn boundary, kept (the last rate) once the window empties,
+// and off before anything was generated.
 func TestStatusBarGenRate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -301,55 +302,60 @@ func TestStatusBarGenRate(t *testing.T) {
 			Type: typ, Seq: seq, Time: t0.Add(offset).UnixMilli(), Data: []byte(data),
 		})
 	}
-	msg := func(seq int64, at time.Duration, in, out int) {
-		e(seq, at, "assistant/message", fmt.Sprintf(`{"turn":1,"step":%d,"message":{"role":"assistant","content":[{"type":"text","text":"x"}]},"usage":{"inputTokens":%d,"outputTokens":%d}}`, seq, in, out))
+	// One streamed step: its first token at first, its usage (and the
+	// canonical message the usage precedes) at done — that span is the
+	// decode window the readout divides by.
+	step := func(seq int64, num int, first, done time.Duration, out int) {
+		e(seq, first, "assistant/chunk", fmt.Sprintf(`{"turn":1,"step":%d,"chunk":{"type":"text-delta","index":0,"text":"x"}}`, num))
+		e(seq+1, done, "assistant/chunk", fmt.Sprintf(`{"turn":1,"step":%d,"chunk":{"type":"usage","usage":{"inputTokens":1000,"outputTokens":%d}}}`, num, out))
+		e(seq+2, done, "assistant/message", fmt.Sprintf(`{"turn":1,"step":%d,"message":{"role":"assistant","content":[{"type":"text","text":"x"}]},"usage":{"inputTokens":1000,"outputTokens":%d}}`, num, out))
 	}
 
 	e(1, 0, "turn/start", `{"turn":1}`)
-	msg(2, 5*time.Second, 1000, 500)
-	msg(3, 15*time.Second, 1000, 500)
+	step(2, 2, 1*time.Second, 6*time.Second, 500)    // 500 tokens over 5s
+	step(5, 3, 11*time.Second, 15*time.Second, 500)  // 500 tokens over 4s
 
-	// Live: 1000 output tokens since the first sample — the rate is the
-	// average over that span (1000/15s at the 20s clock → 67t/s; the
-	// tighter 15s clock reads 100t/s).
-	for _, tc := range []struct {
-		at   time.Duration
-		want string
-	}{
-		{20 * time.Second, " · 67t/s"},
-		{15 * time.Second, " · 100t/s"},
-	} {
-		m.now = t0.Add(tc.at)
+	// 1000 tokens over 9s of decode — 111t/s at either clock: the divisor
+	// is decode time, not the wall-clock span since the first sample.
+	for _, at := range []time.Duration{20 * time.Second, 15 * time.Second} {
+		m.now = t0.Add(at)
 		bar := stripANSI(m.statusBar(m.W))
 		if !strings.Contains(bar, "tokens:") {
 			t.Fatalf("tokens readout missing: %q", bar)
 		}
-		if !strings.Contains(bar, tc.want) {
-			t.Fatalf("at %s: want %q in status bar: %q", tc.at, tc.want, bar)
+		if !strings.Contains(bar, " · 111t/s") {
+			t.Fatalf("at %s: want 111t/s in status bar: %q", at, bar)
 		}
 	}
 
 	// The readout survives the turn end (the window, not the turn, is
-	// the unit): at the 25s clock the 20s span reads 50t/s.
-	e(4, 20*time.Second, "turn/end", `{"turn":1,"reason":{"kind":"completed"}}`)
+	// the unit).
+	e(8, 20*time.Second, "turn/end", `{"turn":1,"reason":{"kind":"completed"}}`)
 	m.now = t0.Add(25 * time.Second)
-	if bar := stripANSI(m.statusBar(m.W)); !strings.Contains(bar, " · 50t/s") {
+	if bar := stripANSI(m.statusBar(m.W)); !strings.Contains(bar, " · 111t/s") {
 		t.Fatalf("rate lost after the turn end: %q", bar)
 	}
 
-	// An input-only message (a cache-heavy turn) adds no generation: the
-	// rate just ages (1000 over the 30s span → 33t/s).
-	e(5, 30*time.Second, "assistant/message", `{"turn":1,"step":4,"message":{"role":"assistant","content":[{"type":"text","text":"x"}]},"usage":{"inputTokens":1000,"cacheReadTokens":700,"outputTokens":0}}`)
+	// An input-only message (a cache-heavy turn) adds no sample: it cannot
+	// move a rate built from decoded output.
+	e(9, 30*time.Second, "assistant/message", `{"turn":1,"step":4,"message":{"role":"assistant","content":[{"type":"text","text":"x"}]},"usage":{"inputTokens":1000,"cacheReadTokens":700,"outputTokens":0}}`)
 	m.now = t0.Add(35 * time.Second)
-	if bar := stripANSI(m.statusBar(m.W)); !strings.Contains(bar, " · 33t/s") {
+	if bar := stripANSI(m.statusBar(m.W)); !strings.Contains(bar, " · 111t/s") {
 		t.Fatalf("input-only message changed the generation rate: %q", bar)
 	}
 
+	// A step folded from history (no first token seen here) carries no
+	// decode time: it joins neither side of the ratio.
+	e(10, 40*time.Second, "assistant/message", `{"turn":1,"step":5,"message":{"role":"assistant","content":[{"type":"text","text":"x"}]},"usage":{"inputTokens":1000,"outputTokens":900}}`)
+	m.now = t0.Add(41 * time.Second)
+	if bar := stripANSI(m.statusBar(m.W)); !strings.Contains(bar, " · 111t/s") {
+		t.Fatalf("a replayed step changed the decode rate: %q", bar)
+	}
+
 	// Past the 60s window the samples decay out; the readout stays up on
-	// the last rate (the 33t/s of the 35s clock), never going off once
-	// the session has generated.
+	// the last rate, never going off once the session has streamed.
 	m.now = t0.Add(90 * time.Second)
-	if bar := stripANSI(m.statusBar(m.W)); !strings.Contains(bar, " · 33t/s") {
+	if bar := stripANSI(m.statusBar(m.W)); !strings.Contains(bar, " · 111t/s") {
 		t.Fatalf("last rate lost after the window drained: %q", bar)
 	}
 }

@@ -322,6 +322,46 @@ func TestDecodePermissionInvalid(t *testing.T) {
 	}
 }
 
+// TestStoreAbsorbsModelSelection pins the model readout across a switch:
+// the durable model/selection event names the model the session will use
+// next, so both the live path and the history re-baseline adopt it — and an
+// echo that names no model must not blank what the session already knows.
+func TestStoreAbsorbsModelSelection(t *testing.T) {
+	s := NewStore("http://x")
+	s.Sess("s1")
+	s.Event("s1", ev(t, "model/selection", 1, map[string]any{
+		"provider": "custom", "model": "switched-model",
+	}))
+	st := s.Get("s1")
+	if st.ModelSel == nil || st.ModelSel.Model != "switched-model" {
+		t.Fatalf("ModelSel = %+v (want the selected model)", st.ModelSel)
+	}
+	if st.Ctx == nil || st.Ctx.Model != "switched-model" {
+		t.Fatalf("Ctx = %+v (want the readout to follow the selection)", st.Ctx)
+	}
+	s.Event("s1", ev(t, "model/selection", 2, map[string]any{"provider": "custom"}))
+	if got := s.Get("s1").Ctx.Model; got != "switched-model" {
+		t.Fatalf("an empty selection blanked the readout: %q", got)
+	}
+
+	// Re-attaching re-baselines from history: the model the session's own
+	// last selection names wins over the host default.
+	r := NewStore("http://x")
+	r.SetHost(&protocol.HostDescription{Provider: "deepseek", Model: "host-model"})
+	r.Sess("s2")
+	r.LoadTail("s2", &protocol.HistoryResponse{Events: []protocol.HistoryEntry{
+		{Event: *ev(t, "request/context", 3, map[string]any{
+			"provider": "deepseek", "model": "host-model", "contextWindow": 128000,
+		})},
+		{Event: *ev(t, "model/selection", 9, map[string]any{
+			"provider": "custom", "model": "selected-in-history",
+		})},
+	}})
+	if got := r.Get("s2").Ctx.Model; got != "selected-in-history" {
+		t.Fatalf("re-baseline readout = %q (want the history's selection)", got)
+	}
+}
+
 // TestStoreLoadTailAbsorbsRequestContext pins the context-window baseline:
 // the transcript fold treats request/context as transparent metadata, so
 // LoadTail must still adopt the window the session history advertises —

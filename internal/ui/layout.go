@@ -1322,7 +1322,7 @@ func (m *Model) statusBar(w int) string {
 			th.Glyph.TokenIn+compactInt(int64(in)),
 			th.Glyph.TokenOut+compactInt(int64(out)))
 		if r, ok := m.genRate(); ok {
-			tokPlain += m.loc.T("status.tps", strconv.Itoa(r))
+			tokPlain += m.loc.T("status.tps", formatTps(r))
 		}
 		tok = th.Faint().Render(tokPlain)
 	}
@@ -1374,15 +1374,14 @@ func (m *Model) tokenTotals() (in, out int) {
 	return in, out
 }
 
-// genRate reports the active session's recent server-side token
-// generation rate: the samples the session has recorded (each assistant
-// message's output at its arrival) averaged over the recent window — the
-// tokens generated since the window's oldest sample, over that span
-// (bounded by the window itself). It tracks the server's pace across
-// turn boundaries; once a session has generated anything the readout
-// stays up (the last rate is cached, so an idle session keeps showing it
-// after the window drains). (0,false) = nothing generated yet.
-func (m *Model) genRate() (int, bool) {
+// genRate reports the active session's recent decode speed: the output
+// tokens of every in-window step divided by the decode time that produced
+// them — first token to step end per step, so prefill, TTFT and the idle
+// gaps between turns stay out of the divisor (the web client's tokens/s).
+// Steps folded from history carry no decode time and cannot rate. The last
+// rate is cached, so an idle session keeps showing it after the window
+// drains. (0,false) = nothing streamed here yet.
+func (m *Model) genRate() (float64, bool) {
 	id := m.activeID()
 	if id == "" {
 		return 0, false
@@ -1390,33 +1389,37 @@ func (m *Model) genRate() (int, bool) {
 	now := m.now.UnixMilli()
 	window := core.GenWindow.Milliseconds()
 	var (
-		sum    int
-		oldest int64
+		tokens int
+		decode int64
 	)
 	if snap := m.st.Get(id); snap != nil {
 		for _, s := range snap.Recent {
-			if now-s.At > window {
+			if now-s.At > window || s.Out <= 0 || s.DecodeMs <= 0 {
 				continue
 			}
-			sum += s.Out
-			if oldest == 0 {
-				oldest = s.At // samples are time-ordered: the first in window is the oldest
-			}
+			tokens += s.Out
+			decode += s.DecodeMs
 		}
 	}
-	if sum > 0 {
-		span := now - oldest
-		if span > window {
-			span = window
-		}
-		if span > 0 {
-			m.lastGenRate[id] = int(math.Round(float64(sum) / (float64(span) / 1000)))
-		}
+	if tokens > 0 && decode > 0 {
+		m.lastGenRate[id] = float64(tokens) * 1000 / float64(decode)
 	}
 	if r, ok := m.lastGenRate[id]; ok {
 		return r, true
 	}
 	return 0, false
+}
+
+// formatTps renders a tokens/s figure the way the web client does: clamped
+// at zero, whole from 10 up, one decimal below.
+func formatTps(v float64) string {
+	if v <= 0 {
+		return "0"
+	}
+	if v >= 10 {
+		return strconv.Itoa(int(math.Round(v)))
+	}
+	return strconv.FormatFloat(math.Round(v*10)/10, 'f', 1, 64)
 }
 
 // modelReadout renders the active session's current model name and

@@ -561,9 +561,8 @@ func (h *helpModal) paste(text string) bool { return h.ed.paste(text) }
 // ---- approval -----------------------------------------------------------------
 
 type approvalModal struct {
-	pen   *core.ApprovalPend
-	loc   *i18n.Locale
-	armed bool // bash-family: the first allow arms, the second confirms
+	pen *core.ApprovalPend
+	loc *i18n.Locale
 }
 
 func (a approvalModal) title() string {
@@ -615,8 +614,10 @@ func commandLine(tool, args string) (string, bool) {
 	return "", false
 }
 
-// update classifies the key; the armed gate and the response ride the
-// dispatch case (which owns the modal's mutation).
+// update classifies the key; the response rides the dispatch case (which
+// owns the modal's mutation). One press decides — a shell approval that
+// took a second confirming press answered nobody's question twice less
+// often than it made the user press twice.
 func (a *approvalModal) update(km tea.KeyMsg) (tea.Cmd, bool) {
 	switch {
 	case km.Type == tea.KeyEnter || km.Type == tea.KeyCtrlA ||
@@ -627,14 +628,6 @@ func (a *approvalModal) update(km tea.KeyMsg) (tea.Cmd, bool) {
 		return nil, true // reject
 	}
 	return nil, false // absorbed by the popup keyboard rule
-}
-
-// bashLike reports whether the pending tool runs shell commands — the
-// approval most often mis-reads, so its allow takes a confirming second
-// key.
-func (a *approvalModal) bashLike() bool {
-	n := strings.ToLower(a.pen.ToolName)
-	return n == "bash" || n == "shell" || n == "exec" || strings.Contains(n, "run")
 }
 
 // ---- questions ----------------------------------------------------------------
@@ -1338,9 +1331,6 @@ func effortSuffix(e string) string {
 }
 
 func (a *approvalModal) hint() string {
-	if a.armed {
-		return a.loc.T("approval.hint.armed")
-	}
 	return a.loc.T("approval.hint")
 }
 

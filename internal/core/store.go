@@ -556,6 +556,13 @@ func (s *Store) LoadTail(id string, resp *protocol.HistoryResponse) {
 				if json.Unmarshal(entry.Event.Data, &d) == nil {
 					applyRequestContext(st, &d)
 				}
+			} else if entry.Event.Type == "model/selection" {
+				// The committed switch, durable: a session that never ran
+				// a turn since still reads the model it was switched to.
+				var sel protocol.ModelSelection
+				if json.Unmarshal(entry.Event.Data, &sel) == nil {
+					applyModelSelectionState(st, &sel)
+				}
 			}
 		}
 		if oldAt > 0 && oldNum > 0 && st.T.TurnStartAt == 0 &&
@@ -669,6 +676,14 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.Tok
 		var d protocol.RequestContextData
 		if json.Unmarshal(ev.Data, &d) == nil {
 			applyRequestContext(st, &d)
+		}
+	case "model/selection":
+		// The host records the committed switch as a durable event (its
+		// catalog "current" is the host-global default, not this session's
+		// pick), so every client converges on the model it runs.
+		var sel protocol.ModelSelection
+		if json.Unmarshal(ev.Data, &sel) == nil {
+			applyModelSelectionState(st, &sel)
 		}
 	case "plan/mode":
 		var m map[string]any
@@ -1683,22 +1698,32 @@ func applyRequestContext(st *Sess, d *protocol.RequestContextData) {
 	}
 }
 
+// applyModelSelectionState records the model a session runs, so the
+// readout follows the selection instead of waiting for the next turn's
+// request/context event. A selection that names no model (a host that
+// echoed an empty one) keeps the last known model.
+func applyModelSelectionState(st *Sess, sel *protocol.ModelSelection) {
+	if sel == nil || sel.Model == "" {
+		return
+	}
+	st.ModelSel = sel
+	if st.Ctx == nil {
+		st.Ctx = &protocol.RequestContextData{Provider: sel.Provider, Model: sel.Model}
+		return
+	}
+	cp := *st.Ctx
+	cp.Provider = sel.Provider
+	cp.Model = sel.Model
+	st.Ctx = &cp
+}
+
 // ApplyModelSelection records a model selection that was just applied to
 // the session, so the UI shows the new model and effort immediately — the
 // matching request/context event only arrives with the next turn.
 func (s *Store) ApplyModelSelection(id string, sel *protocol.ModelSelection) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.Sess(id)
-	st.ModelSel = sel
-	if st.Ctx == nil {
-		st.Ctx = &protocol.RequestContextData{Provider: sel.Provider, Model: sel.Model}
-	} else {
-		cp := *st.Ctx
-		cp.Provider = sel.Provider
-		cp.Model = sel.Model
-		st.Ctx = &cp
-	}
+	applyModelSelectionState(s.Sess(id), sel)
 	s.pushDirty()
 }
 

@@ -30,7 +30,12 @@ func TestPopupOpaqueCard(t *testing.T) {
 	a.Start(ctx)
 	m := NewModel(a)
 	m.W, m.H = 100, 40
-	m.th.Profile = termenv.TrueColor // go test stdout is not a TTY
+	// go test's stdout is no TTY, so the probe read a colorless terminal
+	// and parked every surface on the default; ask for the painted palette
+	// the card contract is written against.
+	m.th.Profile = termenv.TrueColor
+	m.th.NoColor = false
+	m.th.setPalette()
 	card := m.th.CardState()
 	if len(card.bg) == 0 || (len(card.bg) == 1 && card.bg[0] == 49) {
 		t.Fatalf("built-in card surface %v: the popup rides the terminal's own background", card.bg)

@@ -122,24 +122,11 @@ func TestApprovalAutoOpen(t *testing.T) {
 		t.Fatalf("modal bound to approval %q (want app-1)", am.pen.ApprovalId)
 	}
 
-	// A bash-family tool takes a second confirming allow: the first
-	// ctrl+a arms (the modal stays open), the second answers and closes.
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
-	if got := len(m.mods); got != 1 {
-		t.Fatalf("after first ctrl+a: modals = %d (want 1, armed)", got)
-	}
-	if !m.topModal().(*approvalModal).armed {
-		t.Fatalf("first ctrl+a did not arm the bash approval")
-	}
-	// A reject-family key while armed backs out instead of rejecting.
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.topModal().(*approvalModal).armed {
-		t.Fatalf("esc while armed did not disarm")
-	}
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	// One press decides: ctrl+a answers the pending approval and closes
+	// the modal — a bash-family tool is no longer a two-press exception.
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	if got := len(m.mods); got != 0 {
-		t.Fatalf("after confirming ctrl+a: modals = %d (want 0, answered)", got)
+		t.Fatalf("after ctrl+a: modals = %d (want 0, answered)", got)
 	}
 }
 

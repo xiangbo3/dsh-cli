@@ -338,8 +338,9 @@ func TestFoldWatermarkAndEcho(t *testing.T) {
 }
 
 // TestFoldContextInjectionHidden checks that model-facing context
-// injections (the runtime-context snapshot, the skill catalog — user/message
-// events carrying a context form in source.form) stay out of the transcript
+// injections (the runtime-context snapshot, the skill catalog, the
+// compaction checkpoint — user/message events stamped with a context form
+// in source.form or a injecting source kind) stay out of the transcript
 // while still advancing the seq watermark.
 func TestFoldContextInjectionHidden(t *testing.T) {
 	tr := NewTranscript()
@@ -387,8 +388,27 @@ func TestFoldContextInjectionHidden(t *testing.T) {
 		"content": []any{map[string]any{"type": "text", "text": "The approval policy changed from \"ask\" to \"never\" (changed by the user)."}},
 		"source":  map[string]any{"kind": "plugin", "plugin": "user-approval"},
 	}))
+	// A compaction checkpoint is a user message the host stamps with its
+	// source kind alone (no form): the kind is the authority that hides it.
+	tr.Apply(ev(t, "user/message", 7, map[string]any{
+		"id": "cp1", "role": "user",
+		"content": []any{map[string]any{"type": "text", "text": "This is an incomplete conversation that was automatically condensed to free up context."}},
+		"source":  map[string]any{"kind": "compact-checkpoint", "compactionId": "c1", "sourceCommandId": "cmd1"},
+	}))
+	// The model-change notice the upgraded host injects likewise.
+	tr.Apply(ev(t, "user/message", 8, map[string]any{
+		"id": "ms1", "role": "user",
+		"content": []any{map[string]any{"type": "text", "text": "[model changed: deepseek chat]"}},
+		"source":  map[string]any{"kind": "model-selection", "form": "notice"},
+	}))
 	if len(tr.Items) != 2 {
 		t.Fatalf("injections must not render: items = %+v", tr.Items)
+	}
+	// The compaction itself still shows — as the notice that announced it.
+	tr.Apply(ev(t, "compaction/end", 9, map[string]any{"summary": "condensed"}))
+	last := tr.Items[len(tr.Items)-1]
+	if last.Kind != KindNote || last.Note != "context compacted" {
+		t.Fatalf("compaction notice = %+v (want the compacted note)", last)
 	}
 }
 
