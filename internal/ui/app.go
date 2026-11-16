@@ -165,8 +165,10 @@ type Model struct {
 	hostDownSince  time.Time
 	hostDownHinted bool
 	// msgDbg is the DSH_MSG_DBG trace file (developer opt-in): opened
-	// once on the first message, owner-only.
-	msgDbg *os.File
+	// once on the first message, owner-only. msgDbgN counts written
+	// bytes; -1 marks the cap reached (env still set, trace stays shut).
+	msgDbg  *os.File
+	msgDbgN int64
 
 	// usage is the persistent token-usage statistics the /status popup
 	// renders (nil when the app attached no recorder: the popup shows
@@ -375,6 +377,17 @@ const (
 	KeyModesOn  = "\x1b[>4;2m\x1b[>1u"
 	KeyModesOff = "\x1b[>4m\x1b[<1u"
 )
+
+// Degenerate terminals (a torn pty report, a hairline tmux sliver) must
+// not push the widths chrome derives (w-2, inner-…) into strings.Repeat
+// with a negative count; below the floor the render clips, not panics.
+const (
+	minTermW = 12
+	minTermH = 3
+)
+
+// msgDbgCap bounds the DSH_MSG_DBG trace; a var so tests can cap it low.
+var msgDbgCap int64 = 10 << 20
 
 // Init starts the store pumps.
 func (m *Model) Init() tea.Cmd {
@@ -692,19 +705,39 @@ func (m *Model) resetTrans() {
 
 // Update is the tea model update.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.msgDbg != nil {
-		fmt.Fprintf(m.msgDbg, "%s %T %s\n", time.Now().Format("15:04.051"), msg, msg)
-	} else if p := os.Getenv("DSH_MSG_DBG"); p != "" {
-		// Open once: a per-message open+close is a syscall triplet per
-		// message, and the trace carries full message text (0600).
-		if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
-			m.msgDbg = f
-			fmt.Fprintf(f, "%s %T %s\n", time.Now().Format("15:04.051"), msg, msg)
+	if m.msgDbg != nil && m.msgDbgN >= 0 {
+		line := fmt.Sprintf("%s %T %s\n", time.Now().Format("15:04.051"), msg, msg)
+		m.msgDbgN += int64(len(line))
+		if m.msgDbgN > msgDbgCap {
+			// A long-lived session must not grow the trace forever.
+			fmt.Fprint(m.msgDbg, "… trace truncated (cap reached)\n")
+			m.msgDbg.Close()
+			m.msgDbg = nil
+			m.msgDbgN = -1
+		} else {
+			m.msgDbg.WriteString(line)
+		}
+	} else if m.msgDbg == nil && m.msgDbgN == 0 {
+		if p := os.Getenv("DSH_MSG_DBG"); p != "" {
+			// Open once: a per-message open+close is a syscall triplet per
+			// message, and the trace carries full message text (0600).
+			if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+				m.msgDbg = f
+				fmt.Fprintf(f, "%s %T %s\n", time.Now().Format("15:04.051"), msg, msg)
+			}
 		}
 	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.W, m.H = msg.Width, msg.Height
+		// Floor the frame: chrome widths derive from it (w-2, inner-…)
+		// and a degenerate pty report must not drive them negative into
+		// strings.Repeat. Below the floor the render outruns the pane
+		// (the terminal wraps) instead of panicking.
+		m.W, m.H = maxInt(msg.Width, minTermW), maxInt(msg.Height, minTermH)
+		// The resize re-wrapped every row: the selection's row/col
+		// anchors belong to the old layout and would copy the wrong
+		// text — drop it rather than re-derive against the new wrap.
+		m.sel.reset()
 		// A new width invalidates the wrap width of every cached row.
 		m.transDirty = true
 		return m, nil
@@ -1589,9 +1622,12 @@ func (m *Model) handleKey(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case km.Type == tea.KeyCtrlS:
 			m.sideVisible = false
 			return m, nil
+		case km.Type >= keyCtrlDigit1 && km.Type <= keyCtrlDigit5:
+			// ctrl+1..5 keep their dock-jump meaning with the window open.
+		default:
+			m.sideSearch.handleKey(km)
+			return m, nil // the window keeps the key: edited or absorbed
 		}
-		m.sideSearch.handleKey(km)
-		return m, nil // the window keeps the key: edited or absorbed
 	}
 
 	// 2) global chords
@@ -2757,7 +2793,9 @@ func (m *Model) loadLanguage(name string) tea.Cmd {
 	m.resetTrans()
 	if cfg := config.Load(); cfg.Language != loc.Lang {
 		cfg.Language = loc.Lang
-		_ = config.Save(cfg)
+		if err := config.Save(cfg); err != nil {
+			m.addToast(core.Notice{Level: "warn", Text: m.loc.T("settings.savefailed", err.Error())})
+		}
 	}
 	m.addToast(core.Notice{Level: "ok", Text: loc.T("lang.switched", loc.Name())})
 	return nil
@@ -3879,6 +3917,15 @@ func (m *Model) closeModal() {
 	// cookie-gated build follows only open transcripts).
 	if sm, ok := top.(*subagentModal); ok {
 		m.app.UnfollowSubagent(sm.child)
+	}
+	// Price edits apply live; the popup's close is when config learns
+	// about them (one write, not one per keystroke).
+	if sm, ok := top.(*statusModal); ok && sm.priceDirty {
+		cfg := config.Load()
+		cfg.TokenInPrice, cfg.TokenOutPrice = m.tokenInPrice, m.tokenOutPrice
+		if err := config.Save(cfg); err != nil {
+			m.addToast(core.Notice{Level: "warn", Text: m.loc.T("settings.savefailed", err.Error())})
+		}
 	}
 }
 

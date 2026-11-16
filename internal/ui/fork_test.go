@@ -61,7 +61,7 @@ func forkModel(t *testing.T) *Model {
 	m.W, m.H = 120, 40
 	m.st.SetActive("s1")
 	for _, ev := range forkLog() {
-		if ok, _ := m.st.Event("s1", &ev); !ok {
+		if ok, _, _ := m.st.Event("s1", &ev); !ok {
 			t.Fatalf("event %s/%d not applied", ev.Type, ev.Seq)
 		}
 	}

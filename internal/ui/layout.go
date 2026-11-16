@@ -462,9 +462,17 @@ func (m *Model) ctxUsage() (used, window, pct int, known bool) {
 		if window <= 0 {
 			window = cp.ContextWindow
 		}
+		// pressureTokens is the last request's view: it holds still
+		// while a turn streams. projectedTokens is the host's running
+		// forecast for the next request (it moves with the surface as
+		// items commit) — the web client reads it first, so do we.
+		used := cp.ProjectedTokens
+		if used <= 0 {
+			used = cp.PressureTokens
+		}
 		// The footprint stays truthful across a window change (it can
 		// exceed a smaller new window); only the bar caps.
-		return cp.PressureTokens, window, clamp(cp.PressureTokens * 100 / window), true
+		return used, window, clamp(used * 100 / window), true
 	}
 	if window <= 0 {
 		if snap.Ctx == nil || snap.Ctx.ContextWindow <= 0 {
@@ -487,16 +495,6 @@ func (m *Model) ctxUsage() (used, window, pct int, known bool) {
 }
 
 // compactTokens renders a token count for the status line: 52k, 256k, 1.2M.
-func compactTokens(v int) string {
-	switch {
-	case v >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(v)/1_000_000)
-	case v >= 1_000:
-		return fmt.Sprintf("%dk", v/1_000)
-	}
-	return fmt.Sprintf("%d", v)
-}
-
 // ctxBar renders the Ctx icon (∞) leading a 10-cell context-usage progress
 // bar with its percentage and used/total token counts, "(12k/256k)"
 // ("" until the context window is known). The level colors the icon and
@@ -522,7 +520,7 @@ func (m *Model) ctxBar() (styled, plain string) {
 		pick = m.th.Faint
 	}
 	plain = fmt.Sprintf("%s %s %d%% (%s/%s)", m.th.Glyph.Ctx, bar, pct,
-		compactTokens(used), compactTokens(window))
+		compactInt(int64(used)), compactInt(int64(window)))
 	return pick().Render(plain), plain
 }
 
@@ -1433,17 +1431,32 @@ func (m *Model) tokenTotals() (in, out int) {
 // rate is cached, so an idle session keeps showing it after the window
 // drains. (0,false) = nothing streamed here yet.
 func (m *Model) genRate() (float64, bool) {
+	// Rates of sessions the host no longer lists would outlive them:
+	// prune against the roster once it is known.
+	if len(m.lastGenRate) > 0 && m.st.RosterReady() {
+		alive := make(map[string]struct{})
+		for _, r := range m.st.Roster() {
+			alive[r.Id] = struct{}{}
+		}
+		for k := range m.lastGenRate {
+			if _, ok := alive[k]; !ok {
+				delete(m.lastGenRate, k)
+			}
+		}
+	}
 	id := m.activeID()
 	if id == "" {
 		return 0, false
 	}
-	now := m.now.UnixMilli()
 	window := core.GenWindow.Milliseconds()
 	var (
 		tokens int
 		decode int64
 	)
 	if snap := m.st.Get(id); snap != nil {
+		// Samples carry host stamps: age them on the host axis, not the
+		// render clock's (a remote host's skew is unknown to local now).
+		now := m.now.UnixMilli() - snap.ClockOffsetMs
 		for _, s := range snap.Recent {
 			if now-s.At > window || s.Out <= 0 || s.DecodeMs <= 0 {
 				continue
@@ -1564,7 +1577,7 @@ func (m *Model) dockView(w, h int) string {
 					if j.FinishedAt > 0 {
 						dur = textutil.HumanDuration(time.UnixMilli(j.FinishedAt).Sub(time.UnixMilli(j.StartedAt)))
 					} else {
-						dur = textutil.HumanDuration(time.Since(time.UnixMilli(j.StartedAt)))
+						dur = textutil.HumanDuration(time.Since(time.UnixMilli(j.StartedAt + snap.ClockOffsetMs)))
 					}
 				}
 				line := fmt.Sprintf("  %s %-10s %s %s", st().Render(glyph), j.Status, j.Label, th.Faint().Render(dur))

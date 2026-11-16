@@ -437,8 +437,8 @@ func TestStatusBilling(t *testing.T) {
 	if m.tokenInPrice != 83.3 {
 		t.Fatalf("input price = %v, want 83.3 (applies as typed)", m.tokenInPrice)
 	}
-	if got := config.Load().TokenInPrice; got != 83.3 {
-		t.Fatalf("config input price = %v, want 83.3 (not persisted)", got)
+	if got := config.Load().TokenInPrice; got == 83.3 {
+		t.Fatal("config must only be written when the popup closes, not per keystroke")
 	}
 
 	// ↓ switches to the output field; its price applies at once too.
@@ -485,9 +485,6 @@ func TestStatusBilling(t *testing.T) {
 	if m.tokenInPrice != 0 {
 		t.Fatalf("cleared input price = %v, want 0", m.tokenInPrice)
 	}
-	if got := config.Load().TokenInPrice; got != 0 {
-		t.Fatalf("config input price = %v, want 0 after clearing", got)
-	}
 	// The cost now reflects the output price only: 400350*2/1M → 0.80.
 	m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	joined = strings.Join(sm.view(m, 120, 40), "\n")
@@ -501,6 +498,11 @@ func TestStatusBilling(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if m.topModal() != nil {
 		t.Fatal("enter should close the window")
+	}
+	// The close is the persistence point: one config write carrying the
+	// final field states (input cleared, output 2).
+	if cfg := config.Load(); cfg.TokenInPrice != 0 || cfg.TokenOutPrice != 2 {
+		t.Fatalf("config after close = %v/%v, want 0/2", cfg.TokenInPrice, cfg.TokenOutPrice)
 	}
 	m.localSlash("status", "")
 	sm = m.topModal().(*statusModal)

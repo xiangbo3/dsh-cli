@@ -134,7 +134,7 @@ func lastCmds(t *testing.T, a *app.App, id string) {
 func TestBootResumeLastAndHiddenList(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	a := app.New("http://127.0.0.1:3080")
+	a := app.New(deadHostURL)
 	a.Start(ctx)
 	m := NewModel(a)
 	m.splashOff = true
@@ -168,7 +168,7 @@ func TestBootResumeLastAndHiddenList(t *testing.T) {
 
 	// A roster without a single non-blank session: boot opens a fresh
 	// one in the host cwd (the ctrl+n path).
-	a2 := app.New("http://127.0.0.1:3080")
+	a2 := app.New(deadHostURL)
 	m2 := NewModel(a2)
 	m2.splashOff = true
 	m2.st.SetHost(&protocol.HostDescription{Version: "test", Cwd: "/tmp"})
@@ -219,7 +219,7 @@ func TestBootWorkspaceAutoSwitch(t *testing.T) {
 	boot := func() *Model {
 		// No a.Start: a hermetic boot (the pick + switch is pure store
 		// state; the tail load cmd is returned, not run).
-		m := NewModel(app.New("http://127.0.0.1:3080"))
+		m := NewModel(app.New(deadHostURL))
 		m.splashOff = true
 		m.st.SetHost(&protocol.HostDescription{Version: "test", Cwd: "/tmp/a"})
 		return m

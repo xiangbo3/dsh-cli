@@ -28,3 +28,9 @@ func TestMain(m *testing.M) {
 	runewidth.DefaultCondition.StrictEmojiNeutral = true
 	os.Exit(m.Run())
 }
+
+// deadHostURL dials a port nothing listens on: boot paths that need no
+// server fail fast (connection refused) instead of paying a tokenless
+// RPC timeout against the developer's live host — TestMain's throwaway
+// home has no token, so a live dial here buys nothing but 15s waits.
+const deadHostURL = "http://127.0.0.1:9"

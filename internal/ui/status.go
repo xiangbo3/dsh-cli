@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"dsh-cli/internal/config"
 	"dsh-cli/internal/i18n"
 	"dsh-cli/internal/usage"
 	"dsh-cli/internal/version"
@@ -33,6 +32,9 @@ type statusModal struct {
 	// costs (the billing section; applied live as typed).
 	priceInEd  lineEdit
 	priceOutEd lineEdit
+	// priceDirty marks typed-but-unpersisted price edits: config keeps
+	// the value when the popup closes, not on every keystroke.
+	priceDirty bool
 }
 
 const statusSections = 4
@@ -282,10 +284,7 @@ func (s *statusModal) applyPrices(ed *lineEdit) {
 			s.m.tokenOutPrice = v
 		}
 	}
-	cfg := config.Load()
-	cfg.TokenInPrice = s.m.tokenInPrice
-	cfg.TokenOutPrice = s.m.tokenOutPrice
-	_ = config.Save(cfg)
+	s.priceDirty = true
 }
 
 // priceValue parses a field's text as a price: blank is 0 (clearing),
