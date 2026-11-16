@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,10 @@ type App struct {
 	// Re-baseline throttling: flapping peers (and drop-storm pulses) must
 	// not stack concurrent or back-to-back re-baselines.
 	rebBusy atomic.Bool
+	// catchMu guards catchAt, the per-session rate limit of the
+	// stream-gap tail merges (catchUpGap).
+	catchMu sync.Mutex
+	catchAt map[string]time.Time
 	rebLast atomic.Int64 // unixmilli of the last re-baseline start
 
 	// Roster-refresh coalescing (user actions): one fetch in flight and at
@@ -101,7 +106,9 @@ func (a *App) wireAuth(base, token string) {
 		c.Token = tok
 		c.Cookie = cookie
 		c.CookieFor = a.cli.BaseURL()
-		_ = config.Save(c)
+		if err := config.Save(c); err != nil {
+			a.st.Notify(core.Notice{Level: "warn", Text: i18n.LoadDefault().T("settings.savefailed", err.Error())})
+		}
 	})
 }
 
@@ -460,6 +467,38 @@ func (a *App) Rebaseline(ctx context.Context) {
 	wg.Wait()
 	a.persistBaselineCache()
 	a.LoadActiveTail(ctx)
+}
+
+// catchUpGap repairs one session's stream gap: it re-reads the history
+// tail and merges the missing events into the live fold (one RPC, an
+// incremental fold) instead of paying the full re-baseline. The page
+// must reach back behind the gap, and the merge must not surface a
+// fresh one — otherwise (or on RPC failure) the global re-baseline
+// still runs. Per-session rate limit so a flapping stream cannot farm
+// History calls.
+func (a *App) catchUpGap(id string, gapBefore int64) {
+	a.catchMu.Lock()
+	if a.catchAt == nil {
+		a.catchAt = map[string]time.Time{}
+	}
+	if t, ok := a.catchAt[id]; ok && time.Since(t) < 5*time.Second {
+		a.catchMu.Unlock()
+		return
+	}
+	a.catchAt[id] = time.Now()
+	a.catchMu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(a.background(), 10*time.Second)
+		defer cancel()
+		resp, err := a.cli.History(ctx, id, 0, historyPageSize)
+		if err != nil || len(resp.Events) == 0 || resp.Events[0].Event.Seq > gapBefore+1 {
+			a.RebaselineThrottled()
+			return
+		}
+		if fresh := a.st.MergeTail(id, resp); fresh > 0 {
+			a.RebaselineThrottled()
+		}
+	}()
 }
 
 // RebaselineThrottled runs Rebaseline on a background goroutine with two
@@ -892,9 +931,25 @@ func (a *App) pumpFrames(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case fr := <-a.dl.Frames():
-			a.handleFrame(ctx, fr)
+			a.protect("frames", func() { a.handleFrame(ctx, fr) })
 		}
 	}
+}
+
+// protect runs one pump iteration under a panic fence. These goroutines
+// live while bubbletea holds the alt-screen: an unrecovered panic would
+// take the process down with the terminal still garbled. One frame that
+// panics inside the fold or the store costs the frame and a re-baseline
+// (the half-applied state it touched gets repaired) — nothing more.
+func (a *App) protect(name string, f func()) {
+	defer func() {
+		if p := recover(); p != nil {
+			fmt.Fprintf(os.Stderr, "dsh-cli: %s pump recovered from panic: %v\n", name, p)
+			a.st.Notify(core.Notice{Level: "warn", Text: fmt.Sprintf("internal error in %s pump (rebaselining)", name)})
+			a.RebaselineThrottled()
+		}
+	}()
+	f()
 }
 
 func (a *App) pumpStatus(ctx context.Context) {
@@ -907,15 +962,17 @@ func (a *App) pumpStatus(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case up := <-a.dl.Status():
-			a.st.SetConnected(up)
-			if up {
-				if first {
-					first = false
-				} else {
-					a.st.Notify(core.Notice{Level: "ok", Text: i18n.LoadDefault().T("reconnect.ok")})
-					a.RebaselineThrottled()
+			a.protect("status", func() {
+				a.st.SetConnected(up)
+				if up {
+					if first {
+						first = false
+					} else {
+						a.st.Notify(core.Notice{Level: "ok", Text: i18n.LoadDefault().T("reconnect.ok")})
+						a.RebaselineThrottled()
+					}
 				}
-			}
+			})
 		}
 	}
 }
@@ -929,8 +986,10 @@ func (a *App) pumpDrops(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-a.dl.Drops():
-			a.st.Notify(core.Notice{Level: "warn", Text: i18n.LoadDefault().T("reconnect.congested")})
-			a.RebaselineThrottled()
+			a.protect("drops", func() {
+				a.st.Notify(core.Notice{Level: "warn", Text: i18n.LoadDefault().T("reconnect.congested")})
+				a.RebaselineThrottled()
+			})
 		}
 	}
 }
@@ -942,8 +1001,12 @@ func (a *App) handleFrame(ctx context.Context, fr client.DownlinkFrame) {
 		if err != nil {
 			return
 		}
-		if _, usage := a.st.Event(ev.SessionId, &ev.Event); usage != nil {
+		_, usage, gapSeq := a.st.Event(ev.SessionId, &ev.Event)
+		if usage != nil {
 			a.recordUsage(ev.SessionId, &ev.Event, usage)
+		}
+		if gapSeq > 0 {
+			a.catchUpGap(ev.SessionId, gapSeq)
 		}
 	case protocol.FMuxSubscribed:
 		v, err := protocol.DecodeMuxSubscribed(fr.Payload)
