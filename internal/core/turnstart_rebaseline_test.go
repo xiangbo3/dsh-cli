@@ -62,6 +62,12 @@ func TestTurnStartLostOnMidTurnRebaseline(t *testing.T) {
 	}
 	s.LoadTail("s1", tail)
 
+	// Live traffic resumes with a fresh stamp: it re-anchors the clock
+	// estimate back to ≈0 (the hour-old batch above sampled as an hour of
+	// "skew" only because it arrived in one burst after an idle gap).
+	s.Event("s1", &protocol.SessionEvent{Type: "session/title", Seq: 133,
+		Time: time.Now().UnixMilli(), Data: mustJSON(`{"title":"t"}`)})
+
 	snap := s.Get("s1")
 	if snap.TurnStart.IsZero() {
 		t.Fatal("TurnStart lost across the re-baseline (elapsed would reset to 0s)")
@@ -125,8 +131,10 @@ func TestTurnStartCarryOverBoundary(t *testing.T) {
 		ev("turn/end", 31, map[string]any{"turn": 9, "reason": map[string]any{"kind": "completed"}}),
 		ev("assistant/chunk", 51, map[string]any{"turn": 10, "step": 1, "chunk": map[string]any{"type": "text", "text": "x"}}),
 	}})
-	if got := s.Get("s1").TurnStart.UnixMilli(); got != now+50 {
-		t.Fatalf("TurnStart = %d, want the turn-10 start %d", got, now+50)
+	// TurnStart reads on the local basis; the host-basis value is the raw
+	// epoch minus the estimated offset — that is what must carry over.
+	if snap := s.Get("s1"); snap.TurnStart.UnixMilli()-snap.ClockOffsetMs != now+50 {
+		t.Fatalf("TurnStart = %d, want the turn-10 start %d", snap.TurnStart.UnixMilli(), now+50)
 	}
 
 	// A newer turn's start inside the tail wins: no overwrite.
@@ -139,8 +147,8 @@ func TestTurnStartCarryOverBoundary(t *testing.T) {
 		ev("turn/end", 60, map[string]any{"turn": 10, "reason": map[string]any{"kind": "completed"}}),
 		ev("turn/start", 61, map[string]any{"turn": 11}),
 	}})
-	if got := s2.Get("s1").TurnStart.UnixMilli(); got != now+61 {
-		t.Fatalf("TurnStart = %d, want the fresh turn-11 start %d", got, now+61)
+	if snap := s2.Get("s1"); snap.TurnStart.UnixMilli()-snap.ClockOffsetMs != now+61 {
+		t.Fatalf("TurnStart = %d, want the fresh turn-11 start %d", snap.TurnStart.UnixMilli(), now+61)
 	}
 }
 

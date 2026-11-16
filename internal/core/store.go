@@ -132,6 +132,16 @@ type Store struct {
 	// while the UI swaps focus, so it is read atomically).
 	activeChanged atomic.Pointer[ActiveChangedFn]
 
+	// hostSkewMs estimates host epoch − local epoch (ms): event times are
+	// host-native while the UI's render clock is local, so every readout
+	// that compares a host timestamp against local now shifts it by this
+	// first. Estimated as the minimum recent (localReceive − ev.Time):
+	// an event can never arrive before it was made, so the smallest
+	// observed gap is the best skew estimate and stale replay pages only
+	// add large values the minimum ignores.
+	hostSkewMs  int64
+	skewSamples []int64
+
 	// rev is bumped by every pushDirty: the UI compares it to skip the
 	// transcript re-sync when a frame renders without a state mutation in
 	// between (the idle-frame short-circuit).
@@ -170,6 +180,34 @@ func NewStore(base string) *Store {
 		dirty:      make(chan struct{}, 64),
 		notices:    make(chan Notice, 64),
 		turnEnd:    make(chan *TurnEndInfo, 16),
+	}
+}
+
+// sampleHostSkewLocked folds one host event into the clock-offset
+// estimate (see hostSkewMs). Stamps too far from plausibility (a unit
+// confusion, an epoch-less host) are ignored rather than poisoning the
+// estimate.
+func (s *Store) sampleHostSkewLocked(hostTime int64) {
+	const (
+		window  = 32
+		saneGap = int64(12 * 60 * 60 * 1000) // ±12h
+	)
+	if hostTime <= 0 {
+		return
+	}
+	d := time.Now().UnixMilli() - hostTime
+	if d < -saneGap || d > saneGap {
+		return
+	}
+	s.skewSamples = append(s.skewSamples, d)
+	if len(s.skewSamples) > window {
+		s.skewSamples = s.skewSamples[len(s.skewSamples)-window:]
+	}
+	s.hostSkewMs = s.skewSamples[0]
+	for _, v := range s.skewSamples[1:] {
+		if v < s.hostSkewMs {
+			s.hostSkewMs = v
+		}
 	}
 }
 
@@ -655,11 +693,23 @@ func (s *Store) LoadOlder(id string, resp *protocol.HistoryResponse) {
 // state and, for assistant/message events, the parsed token usage (the
 // fold already decoded the payload; the usage recorder must not decode
 // it again).
-func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.TokenUsage) {
+func (s *Store) Event(id string, ev *protocol.SessionEvent) (changed bool, usage *protocol.TokenUsage, gapSeq int64) {
 	s.mu.Lock()
 	st := s.Sess(id)
+	if ev.Seq > 0 {
+		s.sampleHostSkewLocked(ev.Time)
+	}
 	before := len(st.T.Items)
-	changed, usage := st.T.Apply(ev)
+	changed, usage = st.T.Apply(ev)
+	gapSeq = st.T.TakeGapLocked()
+	if n := len(st.T.Items); n > transcriptItemCap {
+		// A session that streams for days without a re-baseline must not
+		// grow the fold (and its re-wrap passes) without bound: the oldest
+		// fifth is dropped and the session keeps its older history on the
+		// host (HasMore stays true — scrollback there re-reads by page).
+		st.T.Items = append(st.T.Items[:0:0], st.T.Items[n/5:]...)
+		st.HasMore = true
+	}
 	switch ev.Type {
 	case "turn/start":
 		st.Running = true
@@ -753,8 +803,12 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.Tok
 		s.pushDirty()
 	}
 	s.mu.Unlock()
-	return changed || before != len(st.T.Items), usage
+	return changed || before != len(st.T.Items), usage, gapSeq
 }
+
+// transcriptItemCap bounds one session's live fold; re-baselines rebuild
+// from the tail page, so only never-reconnecting streams reach it.
+const transcriptItemCap = 50_000
 
 // UserMessageReconcile replaces the optimistic echo for a prompt rpcId.
 func (s *Store) UserMessageReconcile(id, rpcId string) {
@@ -861,6 +915,50 @@ func (s *Store) MuxProjection(id, key string, seq int64, value json.RawMessage) 
 	}
 	s.pushDirty()
 	s.mu.Unlock()
+}
+
+// TakeGapLocked reports and clears a pending stream gap: the seq the
+// gap opened behind (0 = no gap). Callers hold s.mu.
+func (t *Transcript) TakeGapLocked() int64 {
+	if !t.gapSeen {
+		return 0
+	}
+	g := t.gapBefore
+	t.gapSeen, t.gapBefore = false, 0
+	return g
+}
+
+// MergeTail folds a re-fetched history page into a live fold to repair a
+// stream gap without a full re-baseline: page events behind the
+// watermark merge in (Prepend skips known seqs), page events past it
+// apply in order. It returns a fresh gap seq when the page itself skips,
+// i.e. the merge could not close the hole.
+func (s *Store) MergeTail(id string, resp *protocol.HistoryResponse) (gapSeq int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.Sess(id)
+	max := st.T.MaxSeq()
+	var older []*protocol.SessionEvent
+	for i := range resp.Events {
+		ev := &resp.Events[i].Event
+		if ev.Seq <= max {
+			older = append(older, ev)
+		}
+	}
+	if len(older) > 0 {
+		st.T.Prepend(older)
+	}
+	for i := range resp.Events {
+		ev := &resp.Events[i].Event
+		if ev.Seq > max {
+			st.T.Apply(ev)
+			if g := st.T.TakeGapLocked(); g > 0 {
+				gapSeq = g
+			}
+		}
+	}
+	s.pushDirty()
+	return gapSeq
 }
 
 // Subscribed records the per-session stream baseline (lastSeq watermark).
@@ -1470,31 +1568,34 @@ func (s *Store) resortOrder() []string {
 // ever replaced, never mutated in place (see setSummary and the fold's
 // replaceItem/removeItem).
 type Snapshot struct {
-	Id          string
-	Summary     *protocol.SessionSummary
-	Items       []*Item
-	Streaming   *Item // the in-flight item (its Usage: the live preview)
-	Running     bool
-	TurnActive  bool
-	TurnStart   time.Time
-	TurnTok     TurnTokens
-	Totals      TurnTokens  // session-lifetime usage mirror (tokens readout)
-	Recent      []GenSample // the rolling generation samples (t/s readout)
-	Todos       []protocol.TodoItem
-	Goal        *protocol.GoalProjected
-	Permission  *protocol.PermissionProjection
-	PlanMode    bool
-	Ctx         *protocol.RequestContextData
-	CtxPressure *ContextPressure
-	ModelSel    *protocol.ModelSelection
-	Queue       []protocol.QueuedInboxItem
-	Jobs        []protocol.JobView
-	HasMore     bool
-	Approvals   []*ApprovalPend
-	Questions   []*QuestionPend
-	Flash       *TurnEndInfo
-	Fresh       bool
-	Title       string
+	Id         string
+	Summary    *protocol.SessionSummary
+	Items      []*Item
+	Streaming  *Item // the in-flight item (its Usage: the live preview)
+	Running    bool
+	TurnActive bool
+	TurnStart  time.Time
+	TurnTok    TurnTokens
+	Totals     TurnTokens  // session-lifetime usage mirror (tokens readout)
+	Recent     []GenSample // the rolling generation samples (t/s readout)
+	// ClockOffsetMs shifts host-epoch stamps (Recent samples, job times)
+	// onto the local render clock: local = host + ClockOffsetMs.
+	ClockOffsetMs int64
+	Todos         []protocol.TodoItem
+	Goal          *protocol.GoalProjected
+	Permission    *protocol.PermissionProjection
+	PlanMode      bool
+	Ctx           *protocol.RequestContextData
+	CtxPressure   *ContextPressure
+	ModelSel      *protocol.ModelSelection
+	Queue         []protocol.QueuedInboxItem
+	Jobs          []protocol.JobView
+	HasMore       bool
+	Approvals     []*ApprovalPend
+	Questions     []*QuestionPend
+	Flash         *TurnEndInfo
+	Fresh         bool
+	Title         string
 }
 
 // Get returns a point-in-time snapshot of one session.
@@ -1510,15 +1611,16 @@ func (s *Store) Get(id string) *Snapshot {
 	// IsZero guards in the readouts hold.
 	var turnStart time.Time
 	if st.T.TurnStartAt > 0 {
-		turnStart = time.UnixMilli(st.T.TurnStartAt)
+		turnStart = time.UnixMilli(st.T.TurnStartAt + s.hostSkewMs) // local basis
 	}
 	snap := &Snapshot{
 		Id: id, Summary: st.S, Items: st.T.Items, Streaming: st.T.Streaming(),
 		Running: st.Running, TurnActive: st.T.TurnActive,
 		TurnStart: turnStart, TurnTok: st.T.TurnTokens, Totals: st.T.Totals,
-		Recent: append([]GenSample(nil), st.T.Recent...),
-		Todos:  append([]protocol.TodoItem(nil), st.Todos...),
-		Goal:   st.Goal, Permission: st.Permission, PlanMode: st.PlanMode,
+		Recent:        append([]GenSample(nil), st.T.Recent...),
+		ClockOffsetMs: s.hostSkewMs,
+		Todos:         append([]protocol.TodoItem(nil), st.Todos...),
+		Goal:          st.Goal, Permission: st.Permission, PlanMode: st.PlanMode,
 		Ctx: st.Ctx, CtxPressure: st.CtxPressure, ModelSel: st.ModelSel,
 		Queue:   append([]protocol.QueuedInboxItem(nil), st.Queue...),
 		Jobs:    append([]protocol.JobView(nil), st.Jobs...),

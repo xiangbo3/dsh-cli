@@ -112,6 +112,12 @@ type Transcript struct {
 	Items []*Item
 
 	maxSeq int64
+	// gapSeen marks an accepted event whose seq jumped past the
+	// watermark: one or more events were lost in transit and the
+	// transcript is silently incomplete until a tail merge refetches.
+	// gapBefore holds the watermark the gap opened behind.
+	gapSeen   bool
+	gapBefore int64
 	// streaming assembly for the in-flight assistant message
 	streaming bool
 	curTurn   int
@@ -266,6 +272,12 @@ func dropPendingEchoText(t *Transcript, text string) bool {
 func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsage) {
 	if ev.Seq > 0 && ev.Seq <= t.maxSeq {
 		return false, nil
+	}
+	if t.maxSeq > 0 && ev.Seq > t.maxSeq+1 {
+		if !t.gapSeen {
+			t.gapBefore = t.maxSeq
+		}
+		t.gapSeen = true
 	}
 	switch ev.Type {
 	case "turn/start":

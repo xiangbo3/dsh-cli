@@ -138,7 +138,7 @@ func TestStoreLoadTailRebuilds(t *testing.T) {
 		t.Fatal("hasMore lost")
 	}
 	// Live event beyond the tail seq applies.
-	changed, _ := s.Event("s1", ev(t, "user/message", 2, map[string]any{
+	changed, _, _ := s.Event("s1", ev(t, "user/message", 2, map[string]any{
 		"id": "u2", "role": "user",
 		"content": []any{map[string]any{"type": "text", "text": "world"}},
 		"source":  map[string]any{"kind": "user"},
@@ -150,7 +150,7 @@ func TestStoreLoadTailRebuilds(t *testing.T) {
 		t.Fatalf("items = %d", len(got.Items))
 	}
 	// Duplicate tail event is dropped by the watermark.
-	dup, _ := s.Event("s1", &resp.Events[0].Event)
+	dup, _, _ := s.Event("s1", &resp.Events[0].Event)
 	if dup {
 		t.Fatal("duplicate seq should not change state")
 	}
