@@ -129,6 +129,7 @@ var zh = map[string]string{
 	"webhost.restarted":         "已保存的鉴权被拒——已重启 dsh web（pid %d，%s）；dsh-cli 退出后继续运行",
 	"lang.current":              "  （当前）",
 	"lang.failed":               "界面语言：%s — %s（保持 %s）",
+	"settings.savefailed":       "配置保存失败：%s",
 	"lang.hint":                 "  ↑↓ 选择 · enter 切换 · esc 关闭",
 	"lang.list":                 "界面语言：%s — 可用：%s",
 	"lang.none":                 "无匹配",

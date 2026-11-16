@@ -121,13 +121,14 @@ var en = map[string]string{
 	"toast.fork.err":            "fork: %s",
 
 	// ---- /language
-	"lang.list":     "language: %s — available: %s",
-	"lang.switched": "language: %s",
-	"lang.failed":   "language: %s — %s (kept %s)",
-	"lang.title":    "language",
-	"lang.hint":     "  ↑↓ pick · enter switch · esc close",
-	"lang.current":  "  (current)",
-	"lang.none":     "no match",
+	"lang.list":           "language: %s — available: %s",
+	"lang.switched":       "language: %s",
+	"lang.failed":         "language: %s — %s (kept %s)",
+	"settings.savefailed": "settings were not saved: %s",
+	"lang.title":          "language",
+	"lang.hint":           "  ↑↓ pick · enter switch · esc close",
+	"lang.current":        "  (current)",
+	"lang.none":           "no match",
 
 	// ---- slash command descriptions
 	"cmd.help.desc":       "key bindings and commands",

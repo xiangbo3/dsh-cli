@@ -183,6 +183,7 @@
   "search.hint": "  / 查询（250ms） · ↑↓ 选择 · enter 打开 · esc 关闭",
   "search.loading": "搜索中…",
   "search.title": "搜索会话",
+  "settings.savefailed": "配置保存失败：%s",
   "side.hint": "  ↑↓ 移动 · space 选中 · enter 确认 · esc 关闭",
   "side.search": "搜索",
   "side.title": "会话",

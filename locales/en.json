@@ -183,6 +183,7 @@
   "search.hint": "  / query (250ms) · ↑↓ pick · enter open · esc close",
   "search.loading": "searching…",
   "search.title": "search sessions",
+  "settings.savefailed": "settings were not saved: %s",
   "side.hint": "  ↑↓ move · space select · enter confirm · esc close",
   "side.search": "search",
   "side.title": "Sessions",
