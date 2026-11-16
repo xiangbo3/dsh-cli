@@ -291,29 +291,37 @@ func (m *muxStream) openStream(endpoint string, a FollowAddr) {
 	}
 	m.mu.Unlock()
 
-	payload := map[string]any{"args": map[string]any{}}
-	if endpoint == "session/follow" {
-		var address map[string]any
-		if a.Kind == "subagent" {
-			address = map[string]any{
-				"kind":            "subagent",
-				"parentSessionId": a.ParentSessionId,
-				"childSessionId":  a.ChildSessionId,
-				"mode":            a.Mode,
-			}
-		} else {
-			address = map[string]any{"kind": "session", "sessionId": a.SessionId}
-		}
-		payload = map[string]any{"args": map[string]any{
-			"request": map[string]any{"address": address},
-		}}
-	}
+	payload := followOpenPayload(endpoint, a)
 	m.send(map[string]any{
 		"type":     "open",
 		"streamId": id,
 		"endpoint": endpoint,
 		"payload":  payload,
 	})
+}
+
+// followOpenPayload builds the open payload of one stream. A session
+// follow opts into assistantStream: the host only forwards its live model
+// frames when asked, and without those chunks no decode window is ever
+// observed, so the t/s readout has nothing to rate.
+func followOpenPayload(endpoint string, a FollowAddr) map[string]any {
+	if endpoint != "session/follow" {
+		return map[string]any{"args": map[string]any{}}
+	}
+	var address map[string]any
+	if a.Kind == "subagent" {
+		address = map[string]any{
+			"kind":            "subagent",
+			"parentSessionId": a.ParentSessionId,
+			"childSessionId":  a.ChildSessionId,
+			"mode":            a.Mode,
+		}
+	} else {
+		address = map[string]any{"kind": "session", "sessionId": a.SessionId}
+	}
+	return map[string]any{"args": map[string]any{
+		"request": map[string]any{"address": address, "assistantStream": true},
+	}}
 }
 
 func (m *muxStream) nextID() uint32 {
@@ -334,7 +342,12 @@ func (m *muxStream) send(v any) {
 	defer m.writeMu.Unlock()
 	wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = m.conn.Write(wctx, websocket.MessageText, raw)
+	if err := m.conn.Write(wctx, websocket.MessageText, raw); err != nil {
+		// A dead write side the read loop has not noticed would stall
+		// every control frame (subscribes, follow opens): drop the socket
+		// now and let the reconnect ladder re-baseline immediately.
+		go m.conn.Close(websocket.StatusGoingAway, "write failed")
+	}
 }
 
 // route dispatches one socket frame to its stream's re-emit.

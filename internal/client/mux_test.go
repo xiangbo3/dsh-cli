@@ -40,6 +40,36 @@ func findFrame(frames []DownlinkFrame, kind string) *DownlinkFrame {
 	return nil
 }
 
+// TestFollowOpenPayload pins the session/follow open request: the address
+// is carried and assistantStream is opted into (the host only forwards live
+// model frames on that flag, and without them the t/s readout never sees a
+// decode window). Non-follow streams get an empty args map.
+func TestFollowOpenPayload(t *testing.T) {
+	sess := followOpenPayload("session/follow", FollowAddr{Kind: "session", SessionId: "s1"})
+	req, _ := sess["args"].(map[string]any)["request"].(map[string]any)
+	if req == nil {
+		t.Fatalf("session follow payload has no request: %+v", sess)
+	}
+	if req["assistantStream"] != true {
+		t.Errorf("assistantStream = %v, want true", req["assistantStream"])
+	}
+	addr, _ := req["address"].(map[string]any)
+	if addr["sessionId"] != "s1" || addr["kind"] != "session" {
+		t.Errorf("address = %+v, want kind/session s1", addr)
+	}
+
+	sub := followOpenPayload("session/follow", FollowAddr{Kind: "subagent", ParentSessionId: "p", ChildSessionId: "c", Mode: "m"})
+	subReq, _ := sub["args"].(map[string]any)["request"].(map[string]any)
+	if subReq == nil || subReq["assistantStream"] != true {
+		t.Fatalf("subagent follow must also opt into assistantStream: %+v", sub)
+	}
+
+	events := followOpenPayload("$events", FollowAddr{})
+	if args, _ := events["args"].(map[string]any); len(args) != 0 {
+		t.Errorf("$events args = %+v, want empty", args)
+	}
+}
+
 // TestMuxReadyRecordsHostFacts pins the $events ready frame: the clientId
 // and host home land on the shared conn (the result channel + describe use
 // them).
