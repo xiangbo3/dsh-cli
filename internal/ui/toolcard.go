@@ -104,9 +104,9 @@ func toolSummary(name, argsJSON string) string {
 // tools project; anything unrecognized falls back to the plain result text.
 
 type readMeta struct {
-	Path       string `json:"path"`
-	Offset     int    `json:"offset"`
-	Lines      []struct {
+	Path   string `json:"path"`
+	Offset int    `json:"offset"`
+	Lines  []struct {
 		Number int    `json:"number"`
 		Text   string `json:"text"`
 	} `json:"lines"`

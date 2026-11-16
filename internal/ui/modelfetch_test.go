@@ -115,8 +115,19 @@ func TestModelPickerFetchAdd(t *testing.T) {
 		t.Fatalf("m2 entry = %v (want contextWindow 4096)", models[1])
 	}
 
-	// the refresh pulls m2 into the roster.
-	m.Update(refresh())
+	// the refresh pulls m2 into the roster (the handler batches the
+	// catalog refetch with the context-window refresh; run each like the
+	// program does).
+	switch bm := refresh().(type) {
+	case tea.BatchMsg:
+		for _, sub := range bm {
+			if msg := sub(); msg != nil {
+				m.Update(msg)
+			}
+		}
+	case tea.Msg:
+		m.Update(bm)
+	}
 	pk := m.topModal().(*modelPicker)
 	if len(pk.rows) != 2 {
 		t.Fatalf("after refresh: rows=%d (want 2)", len(pk.rows))

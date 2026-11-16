@@ -404,7 +404,7 @@ func (m *Model) Init() tea.Cmd {
 	// terminal pastes then arrive as KeyMsgs flagged Paste, folded into
 	// the focused field by handlePaste.
 	enablePaste := func() tea.Msg { return tea.EnableBracketedPaste() }
-	return tea.Batch(m.tick(), enablePaste)
+	return tea.Batch(m.tick(), enablePaste, m.cmdModelWindows())
 }
 
 // tickInterval paces the render clock. The frame must stay above it: the
@@ -915,7 +915,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, ok := m.topModal().(*addModelPicker); ok {
 			m.closeModal()
 		}
-		return m, m.cmdCatalog(msg.id)
+		return m, tea.Batch(m.cmdCatalog(msg.id), m.cmdModelWindows())
 
 	case skillsLoadedMsg:
 		// The fetch ran off the event loop; store the result (negative
@@ -3325,6 +3325,22 @@ func (m *Model) locateProviderSettings(ctx context.Context, desc *protocol.Setti
 		}
 	}
 	return "", nil
+}
+
+// cmdModelWindows pulls the settings catalog's per-model context windows
+// into the store cache. The host's pressure projection only refreshes its
+// window with the next request after a model switch; the catalog lets the
+// context bar name the selected model's window immediately.
+func (m *Model) cmdModelWindows() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		wins, err := m.app.SettingsModelWindows(ctx)
+		if err == nil && len(wins) > 0 {
+			m.st.SetModelWindows(wins)
+		}
+		return nil
+	}
 }
 
 // settingPathValue walks one namespace value along a settings path.

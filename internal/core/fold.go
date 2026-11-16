@@ -142,7 +142,10 @@ type Transcript struct {
 	TurnStartAt  int64
 	TurnStartNum int // turn number of the turn/start that set TurnStartAt (0: unknown)
 	TurnTokens   TurnTokens
-	TurnActive   bool
+	// Totals mirrors the sum of every folded item's usage (session
+	// lifetime, in incl. cache reads) for the status readouts.
+	Totals     TurnTokens
+	TurnActive bool
 	// Recent holds the server's token-generation samples (one per
 	// assistant step, output at arrival), rolling over GenWindow —
 	// the status bar's t/s readout averages these.
@@ -338,6 +341,11 @@ func (t *Transcript) Apply(ev *protocol.SessionEvent) (bool, *protocol.TokenUsag
 		}
 		t.finalizeStreaming()
 		t.attrTurn(d.Turn)
+		if d.Usage != nil {
+			t.Totals.In += d.Usage.InputTokens + d.Usage.CacheReadTokens
+			t.Totals.Cache += d.Usage.CacheReadTokens
+			t.Totals.Out += d.Usage.OutputTokens
+		}
 		it := t.buildAssistantItem(&d.Message, d.Usage, d.Turn, d.Step, ev.Seq, ev.Time)
 		if i := t.replaceStreamed(it); i >= 0 {
 			t.replaceItem(i, it)
@@ -559,6 +567,9 @@ func (t *Transcript) Prepend(events []*protocol.SessionEvent) {
 	merged = append(merged, scratch.Items...)
 	merged = append(merged, t.Items...)
 	t.Items = merged
+	t.Totals.In += scratch.Totals.In
+	t.Totals.Out += scratch.Totals.Out
+	t.Totals.Cache += scratch.Totals.Cache
 	if t.curItemIdx >= 0 {
 		t.curItemIdx += len(scratch.Items)
 	}
@@ -567,15 +578,15 @@ func (t *Transcript) Prepend(events []*protocol.SessionEvent) {
 
 // contextInjection reports whether a user message is a model-facing context
 // injection rather than a user utterance. Injections arrive as user/message
-// events: context forms (the runtime-context snapshot, the skill catalog)
-// carry source.form, plugin notices (the user-approval policy-change
-// messages, compaction summaries) carry source.kind "plugin", and a
-// compaction checkpoint carries "compact-checkpoint" — hidden like the
-// others (the compaction notice already announced the replacement). Real
-// user sends are kind "user".
+// events stamped with a producer kind: context forms (the runtime-context
+// snapshot, the skill catalog) also carry source.form, but plugin notices,
+// compaction checkpoints and deployment catalogs (the per-session tool list
+// of some deployments) may carry the kind alone — none of them is something
+// the human said. Real user sends are kind "user"; untyped sends come from
+// older hosts.
 func contextInjection(m *protocol.Message) bool {
 	k := m.Source.Kind
-	return k == "plugin" || k == "compact-checkpoint" || m.Source.Form != ""
+	return m.Source.Form != "" || (k != "" && k != "user")
 }
 
 // bumpToolItems re-marks every item that displays the (mutated) shared tool

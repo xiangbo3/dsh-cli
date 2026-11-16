@@ -223,16 +223,16 @@ var en = map[string]string{
 	"help.popup.reopen":      "    ctrl+i               reopen a parked question / approval",
 
 	// ---- approval & question modals
-	"approval.title":      "tool approval — ",
-	"approval.hint":       "  a/enter allow once · d/esc reject",
-	"question.title":      "question %d/%d",
-	"question.hint":       "  ↑↓ option · space mark · ←→ question · enter answer · esc close",
-	"question.plan":       "  plan review — ",
-	"question.selected":   " · selected",
-	"question.no.opts":    "  (no options — type below)",
-	"question.other":      "other: ",
-	"question.need":       "question %d needs an answer (select or type)",
-	"question.parked":     "question parked — press ctrl+i to answer",
+	"approval.title":    "tool approval — ",
+	"approval.hint":     "  a/enter allow once · d/esc reject",
+	"question.title":    "question %d/%d",
+	"question.hint":     "  ↑↓ option · space mark · ←→ question · enter answer · esc close",
+	"question.plan":     "  plan review — ",
+	"question.selected": " · selected",
+	"question.no.opts":  "  (no options — type below)",
+	"question.other":    "other: ",
+	"question.need":     "question %d needs an answer (select or type)",
+	"question.parked":   "question parked — press ctrl+i to answer",
 
 	// ---- model picker
 	"model.title":        "model",

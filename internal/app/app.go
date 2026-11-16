@@ -50,6 +50,12 @@ type App struct {
 	rosterBusy atomic.Bool
 	rosterLast atomic.Int64 // unixmilli of the last roster refresh start
 
+	// Settings-push coalescing (settings/document-updated): re-pull the
+	// catalog's advertised context windows, one fetch in flight and one
+	// per 2s (field saves arrive in bursts).
+	winBusy atomic.Bool
+	winLast atomic.Int64 // unixmilli of the last window fetch start
+
 	// ctx is the app lifetime (Start's parameter); internal background work
 	// hangs off it instead of context.Background().
 	ctx context.Context
@@ -739,6 +745,97 @@ func (a *App) ConfigurableProviders(ctx context.Context) ([]protocol.Configurabl
 	return a.cli.ConfigurableProviders(ctx)
 }
 
+// SettingsModelWindows collects the settings catalog's advertised context
+// windows (core.ModelKey → tokens): the provider directory first, a
+// describe-value scan (providers entries) for the legacy wire.
+func (a *App) SettingsModelWindows(ctx context.Context) (map[string]int, error) {
+	desc, err := a.SettingsDescribe(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]int{}
+	collect := func(provider string, raw json.RawMessage) {
+		var models []struct {
+			Id            string `json:"id"`
+			ContextWindow int    `json:"contextWindow"`
+		}
+		if json.Unmarshal(raw, &models) != nil {
+			return
+		}
+		for _, mo := range models {
+			if mo.Id != "" && mo.ContextWindow > 0 {
+				out[core.ModelKey(provider, mo.Id)] = mo.ContextWindow
+			}
+		}
+	}
+	walk := func(ns string, path []string) (json.RawMessage, bool) {
+		for _, n := range desc.Namespaces {
+			if n.Ns != ns {
+				continue
+			}
+			cur := n.Value
+			for _, p := range path {
+				var obj map[string]json.RawMessage
+				if json.Unmarshal(cur, &obj) != nil {
+					return nil, false
+				}
+				next, ok := obj[p]
+				if !ok {
+					return nil, false
+				}
+				cur = next
+			}
+			return cur, true
+		}
+		return nil, false
+	}
+	if cfgs, err := a.ConfigurableProviders(ctx); err == nil {
+		for _, c := range cfgs {
+			if raw, ok := walk(c.SettingsNs, append(append([]string{}, c.SettingsPath...), "models")); ok {
+				collect(c.Provider, raw)
+			}
+		}
+		return out, nil
+	}
+	for _, n := range desc.Namespaces {
+		var body struct {
+			Providers map[string]struct {
+				Models json.RawMessage `json:"models"`
+			} `json:"providers"`
+		}
+		if json.Unmarshal(n.Value, &body) != nil {
+			continue
+		}
+		for provider, ent := range body.Providers {
+			if len(ent.Models) > 0 {
+				collect(provider, ent.Models)
+			}
+		}
+	}
+	return out, nil
+}
+
+// refreshModelWindowsCoalesced answers a settings push (model parameters
+// changed on another client): re-pull the advertised context windows into
+// the store's cache so the context bar follows without a restart.
+func (a *App) refreshModelWindowsCoalesced() {
+	if !a.winBusy.CompareAndSwap(false, true) {
+		return
+	}
+	defer a.winBusy.Store(false)
+	now := time.Now()
+	if now.UnixMilli()-a.winLast.Load() < 2000 {
+		return
+	}
+	a.winLast.Store(now.UnixMilli())
+	ctx, cancel := context.WithTimeout(a.background(), 30*time.Second)
+	defer cancel()
+	wins, err := a.SettingsModelWindows(ctx)
+	if err == nil && len(wins) > 0 {
+		a.st.SetModelWindows(wins)
+	}
+}
+
 // SettingsDescribe reads every settings namespace (values stay raw).
 func (a *App) SettingsDescribe(ctx context.Context) (*protocol.SettingsDescription, error) {
 	return a.cli.SettingsDescribe(ctx)
@@ -917,6 +1014,8 @@ func (a *App) handleFrame(ctx context.Context, fr client.DownlinkFrame) {
 		if json.Unmarshal(fr.Payload, &v) == nil {
 			a.st.SetAgentPreset(v.SessionId, v.AgentPreset)
 		}
+	case protocol.FMuxSettingsChanged:
+		go a.refreshModelWindowsCoalesced()
 	case protocol.FStreamError:
 		v, err := protocol.DecodeStreamError(fr.Payload)
 		if err == nil {

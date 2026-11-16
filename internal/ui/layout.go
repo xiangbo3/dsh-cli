@@ -428,30 +428,49 @@ func (m *Model) turnFlash(f *core.TurnEndInfo) string {
 	}
 }
 
-// ctxUsage reports the active session's context occupancy. The live
-// "contextPressure" projection wins when the host publishes it (the
-// host's own current footprint against the advertised window); the
-// request/context window plus the last assistant step's usage is the
-// fallback for hosts without the projection. known is false when no
-// window is in reach — the readout stays off instead of guessing.
-func (m *Model) ctxUsage() (pct int, known bool) {
+// ctxUsage reports the active session's context occupancy. The window
+// follows the model the session selects: the settings-catalog/request-context
+// cache answers first — after a switch the host's pressure projection keeps
+// naming the previous model's window until the new model's first request.
+// The pressure projection's footprint is the numerator when published; the
+// last assistant step's usage is the fallback for hosts without the
+// projection. known is false when no window is in reach — the readout stays
+// off instead of guessing.
+func (m *Model) ctxUsage() (used, window, pct int, known bool) {
 	id := m.activeID()
 	if id == "" {
-		return 0, false
+		return 0, 0, 0, false
 	}
 	snap := m.st.Get(id)
 	if snap == nil {
-		return 0, false
+		return 0, 0, 0, false
+	}
+	var prov, model string
+	if snap.ModelSel != nil {
+		prov, model = snap.ModelSel.Provider, snap.ModelSel.Model
+	} else if snap.Ctx != nil {
+		prov, model = snap.Ctx.Provider, snap.Ctx.Model
+	}
+	window = m.st.ModelWindow(prov, model)
+	clamp := func(p int) int {
+		if p > 100 {
+			return 100
+		}
+		return p
 	}
 	if cp := snap.CtxPressure; cp != nil && cp.ContextWindow > 0 {
-		used := cp.PressureTokens
-		if used > cp.ContextWindow {
-			used = cp.ContextWindow
+		if window <= 0 {
+			window = cp.ContextWindow
 		}
-		return used * 100 / cp.ContextWindow, true
+		// The footprint stays truthful across a window change (it can
+		// exceed a smaller new window); only the bar caps.
+		return cp.PressureTokens, window, clamp(cp.PressureTokens * 100 / window), true
 	}
-	if snap.Ctx == nil || snap.Ctx.ContextWindow <= 0 {
-		return 0, false
+	if window <= 0 {
+		if snap.Ctx == nil || snap.Ctx.ContextWindow <= 0 {
+			return 0, 0, 0, false
+		}
+		window = snap.Ctx.ContextWindow
 	}
 	var last *protocol.TokenUsage
 	for i := len(snap.Items) - 1; i >= 0; i-- {
@@ -461,18 +480,29 @@ func (m *Model) ctxUsage() (pct int, known bool) {
 		}
 	}
 	if last == nil {
-		return 0, true
+		return 0, window, 0, true
 	}
-	used := last.InputTokens + last.CacheReadTokens + last.OutputTokens
-	return used * 100 / snap.Ctx.ContextWindow, true
+	used = last.InputTokens + last.CacheReadTokens + last.OutputTokens
+	return used, window, clamp(used * 100 / window), true
+}
+
+// compactTokens renders a token count for the status line: 52k, 256k, 1.2M.
+func compactTokens(v int) string {
+	switch {
+	case v >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(v)/1_000_000)
+	case v >= 1_000:
+		return fmt.Sprintf("%dk", v/1_000)
+	}
+	return fmt.Sprintf("%d", v)
 }
 
 // ctxBar renders the Ctx icon (∞) leading a 10-cell context-usage progress
-// bar with its percentage ("" until the context window is known). The level
-// colors the icon and the bar together: dim below 60%, accent below 85%,
-// warn above.
+// bar with its percentage and used/total token counts, "(12k/256k)"
+// ("" until the context window is known). The level colors the icon and
+// the bar together: dim below 60%, accent below 85%, warn above.
 func (m *Model) ctxBar() (styled, plain string) {
-	pct, known := m.ctxUsage()
+	used, window, pct, known := m.ctxUsage()
 	if !known {
 		return "", ""
 	}
@@ -491,7 +521,8 @@ func (m *Model) ctxBar() (styled, plain string) {
 	default:
 		pick = m.th.Faint
 	}
-	plain = fmt.Sprintf("%s %s %d%%", m.th.Glyph.Ctx, bar, pct)
+	plain = fmt.Sprintf("%s %s %d%% (%s/%s)", m.th.Glyph.Ctx, bar, pct,
+		compactTokens(used), compactTokens(window))
 	return pick().Render(plain), plain
 }
 
@@ -1335,20 +1366,44 @@ func (m *Model) statusBar(w int) string {
 	if ctxPlain != "" {
 		hints = strings.TrimRight(hints, " ") + "  "
 	}
-	avail := w - runewidth.StringWidth(wsPlain+permPlain) - runewidth.StringWidth(hints) -
-		runewidth.StringWidth(conn) - runewidth.StringWidth(tokPlain) -
-		runewidth.StringWidth(ctxPlain) - 2
+	// The right edge (connection, tokens, t/s) is the readout the strip
+	// exists for: a clipped " · 125t/s" tail reads as a missing feature.
+	// When the segments would spill the row, the transient left parts give
+	// way in order — context bar, then the hint (narrowed, then dropped),
+	// then the workspace label — and the right edge is never clipped.
+	spare := func() int {
+		return w - runewidth.StringWidth(wsPlain+permPlain+hints+ctxPlain+conn+tokPlain) - 2
+	}
+	if s := spare(); s < 1 {
+		if ctxPlain != "" {
+			ctxBar, ctxPlain, hints = "", "", strings.TrimRight(hints, " ")
+			s = spare()
+		}
+		if s < 1 && hints != "" {
+			if hw := runewidth.StringWidth(hints) + s; hw >= 8 {
+				hints = runewidth.Truncate(hints, hw, "…")
+			} else {
+				hints = ""
+			}
+			s = spare()
+		}
+		if s < 1 && wsPlain != "" {
+			ws, wsPlain = "", ""
+		}
+	}
+	avail := spare()
 	if avail < 1 {
 		avail = 1
 	}
 	return ws + perm + th.Faint().Render(hints) + ctxBar + strings.Repeat(" ", avail) + conn + tok
 }
 
-// tokenTotals sums the active session's assistant usage into the same
-// in/out aggregation the turn markers use: in counts prompt input plus
-// cache reads, out counts generated output. The in-flight step's usage
-// is not metered until its end, so its streamed content rides the meter
-// as an estimate (estimateStreamed) until the usage lands.
+// tokenTotals reports the active session's in/out aggregation (the same
+// one the turn markers use): in counts prompt input plus cache reads, out
+// counts generated output. The fold keeps the lifetime sum running in
+// snap.Totals as canonical messages land, so the readout is O(1); the
+// in-flight step's usage is not metered until its end, so its streamed
+// content rides the meter as the live preview (or an estimate) alone.
 func (m *Model) tokenTotals() (in, out int) {
 	id := m.activeID()
 	if id == "" {
@@ -1358,17 +1413,13 @@ func (m *Model) tokenTotals() (in, out int) {
 	if snap == nil {
 		return 0, 0
 	}
-	for _, it := range snap.Items {
-		if it.Kind != core.KindAssistant {
-			continue
-		}
-		if it.Usage != nil {
-			in += it.Usage.InputTokens + it.Usage.CacheReadTokens
-			out += it.Usage.OutputTokens
-			continue
-		}
-		if it == snap.Streaming {
-			out += estimateStreamed(it)
+	in, out = snap.Totals.In, snap.Totals.Out
+	if s := snap.Streaming; s != nil {
+		if s.Usage != nil {
+			in += s.Usage.InputTokens + s.Usage.CacheReadTokens
+			out += s.Usage.OutputTokens
+		} else {
+			out += estimateStreamed(s)
 		}
 	}
 	return in, out

@@ -401,11 +401,18 @@ func TestFoldContextInjectionHidden(t *testing.T) {
 		"content": []any{map[string]any{"type": "text", "text": "[model changed: deepseek chat]"}},
 		"source":  map[string]any{"kind": "model-selection", "form": "notice"},
 	}))
+	// A deployment's tool catalog carries its producer kind alone (no
+	// form): the kind still marks it as model-facing, not a user utterance.
+	tr.Apply(ev(t, "user/message", 9, map[string]any{
+		"id": "tc1", "role": "user",
+		"content": []any{map[string]any{"type": "text", "text": "The following tools are available in this session:"}},
+		"source":  map[string]any{"kind": "acme-tool-catalog"},
+	}))
 	if len(tr.Items) != 2 {
 		t.Fatalf("injections must not render: items = %+v", tr.Items)
 	}
 	// The compaction itself still shows — as the notice that announced it.
-	tr.Apply(ev(t, "compaction/end", 9, map[string]any{"summary": "condensed"}))
+	tr.Apply(ev(t, "compaction/end", 10, map[string]any{"summary": "condensed"}))
 	last := tr.Items[len(tr.Items)-1]
 	if last.Kind != KindNote || last.Note != "context compacted" {
 		t.Fatalf("compaction notice = %+v (want the compacted note)", last)

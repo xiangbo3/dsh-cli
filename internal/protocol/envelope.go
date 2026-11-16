@@ -165,9 +165,11 @@ const (
 	FStreamError    = "stream/error"
 	// FMuxActivity and FMuxPresetSelected are synthetic frames the
 	// cookie-gated downlink re-emits from its $events bus (the legacy
-	// host pushed no equivalent).
-	FMuxActivity       = "session/activity"
-	FMuxPresetSelected = "agent-preset/selected"
+	// host pushed no equivalent). FMuxSettingsChanged forwards
+	// settings/document-updated so the model-window cache can re-pull.
+	FMuxActivity        = "session/activity"
+	FMuxPresetSelected  = "agent-preset/selected"
+	FMuxSettingsChanged = "settings/changed"
 )
 
 // Host stream frame types.

@@ -312,8 +312,8 @@ func TestStatusBarGenRate(t *testing.T) {
 	}
 
 	e(1, 0, "turn/start", `{"turn":1}`)
-	step(2, 2, 1*time.Second, 6*time.Second, 500)    // 500 tokens over 5s
-	step(5, 3, 11*time.Second, 15*time.Second, 500)  // 500 tokens over 4s
+	step(2, 2, 1*time.Second, 6*time.Second, 500)   // 500 tokens over 5s
+	step(5, 3, 11*time.Second, 15*time.Second, 500) // 500 tokens over 4s
 
 	// 1000 tokens over 9s of decode — 111t/s at either clock: the divisor
 	// is decode time, not the wall-clock span since the first sample.

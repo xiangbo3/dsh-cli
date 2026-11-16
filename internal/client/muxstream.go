@@ -523,10 +523,14 @@ func (m *muxStream) reEmit(event string, args []json.RawMessage) {
 				})
 			}
 		}
+	case "settings/document-updated":
+		// Model parameters (context windows, catalogs) live in these
+		// documents: forward so the context bar's cached windows re-pull.
+		m.emitFrame(DownlinkFrame{Kind: protocol.FMuxSettingsChanged, Payload: mustJSON(struct{}{})})
 	}
-	// The rest (commands/change, settings/document-updated, the
-	// credentials and llm notices, cordis/*) need no store reaction:
-	// the legacy build did not push them either.
+	// The rest (commands/change, the credentials and llm notices,
+	// cordis/*) need no store reaction: the legacy build did not push
+	// them either.
 }
 
 // reWaterfall maps a forwarded waterfall event onto the legacy

@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- On a narrow terminal the status bar no longer clips its right edge: the
+  t/s (and tokens) readout stays visible, the hint, context bar and
+  workspace label give way first.
+- The per-session tool-list notice some deployments inject no longer
+  shows up in the transcript as if the user had typed it.
+- The context bar now shows the current model's context window right
+  after a model switch, and spells out the used/total tokens after the
+  percentage, e.g. (12k/256k).
+- Editing a model's settings (e.g. its context window) in another
+  client now updates the CLI's context bar live, without a restart.
 - The host's auto-generated checkpoint ("This is an incomplete
   conversation…") no longer appears in the conversation as a message.
 - An approval now answers on the first key: shell tools stopped asking
@@ -16,6 +26,13 @@
 
 ### 修复
 
+- 窄终端下状态栏不再截断右缘：t/s（与 tokens）读数保持可见，
+  优先让位的是提示语、上下文条与工作区标签。
+- 某些部署注入的会话工具清单提示不再以用户消息的形式出现在转录中。
+- 上下文进度条现在在切换模型后立即显示当前模型的上下文窗口，
+  并在百分比后标出已用/总量，如 (12k/256k)。
+- 在其它客户端修改模型设置（如上下文窗口）后，CLI 的上下文
+  进度条实时更新，无需重启。
 - 主机自动生成的检查点提示（"This is an incomplete conversation…"）
   不再作为对话消息显示。
 - 确认消息按一次键即作出回应：工具执行不再要求再按一次确认。

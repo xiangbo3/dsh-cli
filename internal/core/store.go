@@ -111,6 +111,12 @@ type Store struct {
 	wsCashed   bool              // boot: the previously persisted registry is installed
 	wsBind     map[string]string // session → workspace seeded at creation (authoritative membership before the registry row lists it)
 
+	// modelWin caches each model's advertised context window
+	// (ModelKey → tokens), fed by the settings catalog and request/context
+	// events: after a model switch the pressure projection keeps naming
+	// the previous model's window until the new model's first request.
+	modelWin map[string]int
+
 	dirty   chan struct{}
 	notices chan Notice
 	turnEnd chan *TurnEndInfo
@@ -160,10 +166,52 @@ func NewStore(base string) *Store {
 		workspaces: map[string]*protocol.WorkspaceView{},
 		wsBind:     map[string]string{},
 		archived:   map[string]bool{},
+		modelWin:   map[string]int{},
 		dirty:      make(chan struct{}, 64),
 		notices:    make(chan Notice, 64),
 		turnEnd:    make(chan *TurnEndInfo, 16),
 	}
+}
+
+// ModelKey names a model in the context-window cache.
+func ModelKey(provider, model string) string { return provider + "\x00" + model }
+
+// ModelWindow returns a model's advertised context window, 0 when no
+// source ever named one.
+func (s *Store) ModelWindow(provider, model string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.modelWin[ModelKey(provider, model)]
+}
+
+// SetModelWindows merges a provider/model → context-window map (the
+// settings catalog) into the cache; later sources win.
+func (s *Store) SetModelWindows(wins map[string]int) {
+	if len(wins) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.modelWin == nil {
+		s.modelWin = map[string]int{}
+	}
+	for k, v := range wins {
+		if v > 0 {
+			s.modelWin[k] = v
+		}
+	}
+	s.pushDirty()
+}
+
+// noteModelWindow remembers a window a frame advertised (s.mu held).
+func (s *Store) noteModelWindow(provider, model string, win int) {
+	if provider == "" || model == "" || win <= 0 {
+		return
+	}
+	if s.modelWin == nil {
+		s.modelWin = map[string]int{}
+	}
+	s.modelWin[ModelKey(provider, model)] = win
 }
 
 // Dirty yields a pulse on every state mutation (coalesced).
@@ -554,7 +602,7 @@ func (s *Store) LoadTail(id string, resp *protocol.HistoryResponse) {
 				// baseline, not only after a live turn.
 				var d protocol.RequestContextData
 				if json.Unmarshal(entry.Event.Data, &d) == nil {
-					applyRequestContext(st, &d)
+					applyRequestContext(s, st, &d)
 				}
 			} else if entry.Event.Type == "model/selection" {
 				// The committed switch, durable: a session that never ran
@@ -675,7 +723,7 @@ func (s *Store) Event(id string, ev *protocol.SessionEvent) (bool, *protocol.Tok
 	case "request/context":
 		var d protocol.RequestContextData
 		if json.Unmarshal(ev.Data, &d) == nil {
-			applyRequestContext(st, &d)
+			applyRequestContext(s, st, &d)
 		}
 	case "model/selection":
 		// The host records the committed switch as a durable event (its
@@ -1430,6 +1478,7 @@ type Snapshot struct {
 	TurnActive  bool
 	TurnStart   time.Time
 	TurnTok     TurnTokens
+	Totals      TurnTokens  // session-lifetime usage mirror (tokens readout)
 	Recent      []GenSample // the rolling generation samples (t/s readout)
 	Todos       []protocol.TodoItem
 	Goal        *protocol.GoalProjected
@@ -1466,7 +1515,7 @@ func (s *Store) Get(id string) *Snapshot {
 	snap := &Snapshot{
 		Id: id, Summary: st.S, Items: st.T.Items, Streaming: st.T.Streaming(),
 		Running: st.Running, TurnActive: st.T.TurnActive,
-		TurnStart: turnStart, TurnTok: st.T.TurnTokens,
+		TurnStart: turnStart, TurnTok: st.T.TurnTokens, Totals: st.T.Totals,
 		Recent: append([]GenSample(nil), st.T.Recent...),
 		Todos:  append([]protocol.TodoItem(nil), st.Todos...),
 		Goal:   st.Goal, Permission: st.Permission, PlanMode: st.PlanMode,
@@ -1691,8 +1740,9 @@ func (s *Store) Notify(n Notice) { s.pushNotice(n) }
 // treats the event as transparent metadata, so LoadTail must absorb it
 // explicitly). The event also carries the model the host will actually
 // use for the next request; a different model voids the displayed effort.
-func applyRequestContext(st *Sess, d *protocol.RequestContextData) {
+func applyRequestContext(s *Store, st *Sess, d *protocol.RequestContextData) {
 	st.Ctx = d
+	s.noteModelWindow(d.Provider, d.Model, d.ContextWindow)
 	if ms := st.ModelSel; ms != nil && d.Model != "" && d.Model != ms.Model {
 		st.ModelSel = &protocol.ModelSelection{Provider: d.Provider, Model: d.Model}
 	}
