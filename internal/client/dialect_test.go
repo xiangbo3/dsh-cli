@@ -208,6 +208,17 @@ func (f *fakeNewHost) unary(w http.ResponseWriter, env protocol.Envelope, r *htt
 		value = map[string]any{"ok": true}
 	case "agentPresets/select":
 		value = "minimal"
+	case "permissionPresets/catalog":
+		value = map[string]any{
+			"options": []any{
+				map[string]any{"value": "workspace-write", "name": "workspace-write"},
+				map[string]any{"value": "danger-full-access", "name": "Full access"},
+			},
+			"defaultOptions": []any{
+				map[string]any{"value": "workspace-write", "name": "workspace-write"},
+			},
+			"defaultPreset": "workspace-write",
+		}
 	case "commands/execute":
 		value = map[string]any{
 			"commandId": "cmd-1",

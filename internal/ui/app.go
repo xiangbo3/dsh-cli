@@ -206,10 +206,10 @@ type Model struct {
 	pendingPrompt string
 	pendingCycle  bool
 
-	// baselinePending tracks the session whose permissions tail is being
-	// pulled for a permission cycle: a rapid second press must not stack
-	// a second baseline + a second cycle when both land.
-	baselinePending string
+	// permPending is the session whose permission-readiness pull (the
+	// permissions baseline plus the preset catalog) is in flight: a rapid
+	// second press must not stack a second pull + a second cycle.
+	permPending string
 
 	// stagedMode holds a mode pick for a session that could not take it
 	// in place (it had already run); the next new session starts from it,
@@ -293,9 +293,9 @@ type dirtyMsg struct{}
 // reconcile (the tail-page fetch worker's reply).
 type statusRefreshDoneMsg struct{}
 
-// permBaselineMsg reports that a session's tail (carrying the permissions
-// projection baseline) has been pulled; the pending permission cycle then
-// proceeds from the real current preset.
+// permBaselineMsg reports that one session's permission-readiness pull
+// landed; the parked permission cycle then proceeds from the real current
+// preset and the deployment's real preset table.
 type permBaselineMsg struct{ id string }
 type noticeMsg struct{ n core.Notice }
 type tickMsg struct{ t time.Time }
@@ -898,7 +898,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handlePaste(msg.text)
 
 	case permBaselineMsg:
-		m.baselinePending = ""
+		m.permPending = ""
 		// The user may have switched sessions while the baseline loaded.
 		if msg.id == m.activeID() {
 			return m, m.cycleStep(msg.id)
@@ -1034,7 +1034,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.pendingCycle {
 				m.pendingCycle = false
-				cmds = append(cmds, m.baselineCycle(msg.id))
+				cmds = append(cmds, m.permReadyPull(msg.id))
 			}
 			cmds = append(cmds, m.cmdLoadModels(msg.id))
 			return m, tea.Sequence(append(cmds, m.cmdLoadTail(msg.id))...)
@@ -2744,12 +2744,7 @@ func (m *Model) localSlash(name, rest string) (tea.Cmd, bool) {
 			return nil, true
 		}
 		if rest == "" {
-			if snap := m.st.Get(id); snap != nil && snap.Permission != nil {
-				m.addToast(core.Notice{Level: "info", Text: m.loc.T("toast.permission.prefix") + permissionLabel(snap.Permission.CurrentValue)})
-			} else {
-				m.addToast(core.Notice{Level: "info", Text: m.loc.T("toast.permission.unknown")})
-			}
-			return nil, true
+			return m.reportPermission(id), true
 		}
 		return m.runPermission(id, rest), true
 	case "language":
@@ -2929,56 +2924,79 @@ func (m *Model) forkAnchorSeq(id string) int64 {
 	return anchor
 }
 
-// cmdCyclePermission advances the active session's permission preset to the
-// next one in the DSH preset cycle (read-only -> workspace-write ->
-// danger-full-access) by issuing the host's /permission command. The preset
-// table comes from the "permissions" projection; without it the canonical
-// dsh-base table is cycled.
+// cmdCyclePermission advances the active session's permission preset to
+// the next one in the deployment's preset cycle by issuing the host's
+// /permission command. The table is the host's process-level
+// permissionPresets catalog; the projection's inline options (older
+// builds) and the canonical dsh-base table are the fallbacks.
 func (m *Model) cmdCyclePermission() tea.Cmd {
 	id, cmd := m.ensureSession()
 	if id == "" {
 		m.pendingCycle = true
 		return cmd
 	}
-	if snap := m.st.Get(id); snap != nil && snap.Permission != nil {
+	if m.permReady(id) {
 		return m.cycleStep(id)
 	}
-	// A baseline is already in flight for this session: the queued
+	// A readiness pull is already in flight for this session: the queued
 	// permBaselineMsg cycles once it lands (rapid presses must not stack
-	// a second baseline + a second cycle).
-	if m.baselinePending == id {
+	// a second pull + a second cycle).
+	if m.permPending == id {
 		return nil
 	}
-	// Fresh boot or a just-picked session: the permissions projection has
-	// not been baselined yet (the history tail carries it). Pull the tail,
-	// then cycle from the real current preset — otherwise the first presses
-	// would jump to the first standard preset instead of cycling.
-	m.baselinePending = id
-	return m.baselineCycle(id)
+	// Fresh boot or a just-picked session: neither the current preset (the
+	// history tail carries it) nor the deployment's preset table is known,
+	// and the standard table is only a guess this deployment may not
+	// answer — pull both, then cycle from the real state.
+	m.permPending = id
+	return m.permReadyPull(id)
 }
 
-// baselineCycle pulls one session's tail (which carries the permissions
-// projection baseline), then cycles from the loaded preset.
-func (m *Model) baselineCycle(id string) tea.Cmd {
+// permReady reports whether one session can be cycled from real state:
+// its current preset, plus a known preset table — the catalog, or the
+// deployment's answer that it publishes none.
+func (m *Model) permReady(id string) bool {
+	snap := m.st.Get(id)
+	if snap == nil || snap.Permission == nil {
+		return false
+	}
+	opts, tried := m.st.PermissionCatalog()
+	return len(opts) > 0 || tried
+}
+
+// permReadyPull loads one session's tail (carrying the permissions
+// projection baseline) plus the host's preset catalog, then reports
+// ready so the parked cycle resumes from real state.
+func (m *Model) permReadyPull(id string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		m.app.LoadTail(ctx, id)
+		m.app.PermissionCatalog(ctx)
 		return permBaselineMsg{id: id}
 	}
 }
 
-// cycleStep switches to the preset following the session's current one. An
-// unknown current value (no projection, e.g. a deployment without the
-// permission plugin) starts the standard dsh-base cycle.
-func (m *Model) cycleStep(id string) tea.Cmd {
+// nextPreset resolves the preset that follows the session's current one.
+// The order is the deployment's table; an unknown current value (a
+// derived "custom" knob pair, or no projection at all) starts at its
+// first entry.
+func (m *Model) nextPreset(id string) string {
 	cur := ""
 	var opts []protocol.PermissionOption
 	if snap := m.st.Get(id); snap != nil && snap.Permission != nil {
 		cur = snap.Permission.CurrentValue
 		opts = snap.Permission.Options
 	}
-	return m.runPermission(id, core.NextPermission(cur, opts))
+	if len(opts) == 0 {
+		opts, _ = m.st.PermissionCatalog()
+	}
+	return core.NextPermission(cur, opts)
+}
+
+// cycleStep switches to the preset following the session's current one.
+func (m *Model) cycleStep(id string) tea.Cmd {
+	return m.runPermission(id, m.nextPreset(id))
 }
 
 // runPermission switches one session's preset through the host /permission
@@ -3001,6 +3019,30 @@ func (m *Model) runPermission(id, preset string) tea.Cmd {
 			return fmt.Errorf("command failed")
 		}
 		m.st.Notify(core.Notice{Level: permissionToastLevel(preset), Text: m.loc.T("toast.permission.switched", permissionLabel(preset))})
+		return nil
+	})
+}
+
+// reportPermission answers a bare /permission. A baselined session reads
+// its own chip; an unbaselined one asks the host, whose bare /permission
+// reports the current preset and the available table — the truth beats a
+// standing "unknown" while the tail is still loading.
+func (m *Model) reportPermission(id string) tea.Cmd {
+	if snap := m.st.Get(id); snap != nil && snap.Permission != nil {
+		m.addToast(core.Notice{Level: "info", Text: m.loc.T("toast.permission.prefix") + permissionLabel(snap.Permission.CurrentValue)})
+		return nil
+	}
+	return m.runCmd("permission", func(ctx context.Context) error {
+		outcome, matched, err := m.app.SetPermission(ctx, id, "")
+		if err != nil || !matched || outcome == nil {
+			m.st.Notify(core.Notice{Level: "info", Text: m.loc.T("toast.permission.unknown")})
+			return nil
+		}
+		text := outcome.Text
+		if text == "" {
+			text = m.loc.T("toast.permission.unknown")
+		}
+		m.st.Notify(core.Notice{Level: "info", Text: text})
 		return nil
 	})
 }

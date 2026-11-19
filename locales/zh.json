@@ -1,5 +1,5 @@
 {
-  "_version": "1.0.54",
+  "_version": "1.0.55",
   "addmodel.adding": "  正在添加…",
   "addmodel.hint": "  已勾选 %d 个 · ↑↓ 选择 · space 切换 · enter 添加 · esc 关闭",
   "addmodel.title": "添加模型 · %s",

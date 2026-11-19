@@ -182,6 +182,26 @@ func TestNextPermissionCycle(t *testing.T) {
 	if got := NextPermission("danger-full-access", opts); got != "read-only" {
 		t.Fatalf("wrap with custom in table = %q", got)
 	}
+	// A stock deployment (the plugin's shipped two-preset table, plus a
+	// live Auto) is what the host's catalog answers: the cycle walks that
+	// table only — a hardcoded read-only step would name a preset the
+	// deployment rejects — and Auto is a switch target.
+	stock := []protocol.PermissionOption{
+		{Value: "workspace-write", Name: "workspace-write"},
+		{Value: "danger-full-access", Name: "danger-full-access"},
+		{Value: "auto", Name: "Auto"},
+	}
+	for cur, want := range map[string]string{
+		"":                   "workspace-write",
+		"workspace-write":    "danger-full-access",
+		"danger-full-access": "auto",
+		"auto":               "workspace-write", // wraps
+		"custom":             "workspace-write", // derived pair, not a target
+	} {
+		if got := NextPermission(cur, stock); got != want {
+			t.Fatalf("stock catalog NextPermission(%q) = %q, want %q", cur, got, want)
+		}
+	}
 	// Empty table falls back to the standard dsh-base cycle.
 	std := map[string]string{
 		"":                   "read-only",

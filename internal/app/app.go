@@ -460,6 +460,10 @@ func (a *App) LoadOlder(ctx context.Context, id string, beforeSeq int64) {
 // Rebaseline is the reconnect recovery: fresh roster + workspace registry
 // + active tail page. The warm cache tracks the last good baselines too.
 func (a *App) Rebaseline(ctx context.Context) {
+	// A re-baseline follows a host (re)connect: the preset table is
+	// process-level state the next host may answer differently, so drop
+	// the cache and let the next cycle re-read it.
+	a.st.SetPermissionCatalog(nil, false)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); a.refreshRoster(ctx) }()
@@ -718,13 +722,35 @@ func (a *App) PromptWithID(ctx context.Context, id, text, mode, rpcId string) er
 // SetPermission switches one session's permission preset through the host
 // /permission command (dsh-permission-presets: sandbox mode + approval
 // policy bundle). It needs no model turn and works while a turn runs.
-// matched is false when the deployment has no permission command.
+// An empty preset is the bare invocation, which reports the current
+// preset and the available table. matched is false when the deployment
+// has no permission command.
 func (a *App) SetPermission(ctx context.Context, id, preset string) (outcome *protocol.CommandOutcome, matched bool, err error) {
-	res, matched, err := a.cli.CommandExecute(ctx, id, "/permission "+preset)
+	line := "/permission"
+	if preset != "" {
+		line += " " + preset
+	}
+	res, matched, err := a.cli.CommandExecute(ctx, id, line)
 	if err != nil || res == nil {
 		return nil, matched, err
 	}
 	return &res.Result, true, nil
+}
+
+// PermissionCatalog reads the deployment's permission preset table into
+// the store cache. The session projection carries only the current
+// preset, so this process-level remote is the only source of the
+// deployment's own preset order; a deployment without the plugin leaves
+// an empty but attempted cache, and the cycle falls back to the standard
+// table instead of re-dialing on every keypress.
+func (a *App) PermissionCatalog(ctx context.Context) []protocol.PermissionOption {
+	cat, err := a.cli.PermissionCatalog(ctx)
+	if err != nil || cat == nil {
+		a.st.SetPermissionCatalog(nil, true)
+		return nil
+	}
+	a.st.SetPermissionCatalog(cat.Options, true)
+	return cat.Options
 }
 
 // Cancel stops the active turn.

@@ -159,6 +159,30 @@ func TestMuxControlBaselineReemits(t *testing.T) {
 	}
 }
 
+// TestMuxControlProjectionChangeReemits pins the live projection change
+// frame: one committed event carries every moved key under changes (the
+// value under val, the seq shared). Each change must become its own
+// legacy projection frame, or the bottom bar's permission chip stays
+// stale after a ctrl+p cycle.
+func TestMuxControlProjectionChangeReemits(t *testing.T) {
+	s, m := newMuxTest(t)
+	sub := &muxSub{endpoint: "session/control"}
+	m.emit(sub, sub.endpoint, []byte(`{"type":"projection","sessionId":"s1","seq":6,"changes":[{"key":"permissions","val":{"currentValue":"danger-full-access"}},{"key":"inbox","val":{"next-turn":[]}}]}`))
+	frames := drainFrames(t, s)
+	var perms [][]byte
+	for _, f := range frames {
+		if f.Kind == "session/projection" && contains(f.Payload, `"key":"permissions"`) {
+			perms = append(perms, f.Payload)
+		}
+	}
+	if len(perms) != 1 {
+		t.Fatalf("frames = %+v, want one permissions projection frame", frames)
+	}
+	if !contains(perms[0], `"currentValue":"danger-full-access"`) || !contains(perms[0], `"seq":6`) {
+		t.Fatalf("payload = %s, want the danger-full-access value at seq 6", perms[0])
+	}
+}
+
 // TestMuxWorkspaceBaselineFeedsMirror pins the workspace/follow baseline:
 // it lands on the shared conn's registry mirror (workspace.list reads it).
 func TestMuxWorkspaceBaselineFeedsMirror(t *testing.T) {

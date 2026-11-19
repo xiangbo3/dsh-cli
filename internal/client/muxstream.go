@@ -898,12 +898,10 @@ func (m *muxStream) emitProjection(sessionId, key string, seq int64, value json.
 func (m *muxStream) emitControl(value json.RawMessage) {
 	var v struct {
 		Type      string          `json:"type"`
-		Value     json.RawMessage `json:"value"` // baseline block or one projection value
+		Value     json.RawMessage `json:"value"` // baseline block
 		SessionId string          `json:"sessionId"`
 		Items     json.RawMessage `json:"items"`
 		Jobs      json.RawMessage `json:"jobs"`
-		Key       string          `json:"key"`
-		Seq       int64           `json:"seq"`
 	}
 	if err := json.Unmarshal(value, &v); err != nil {
 		return
@@ -941,7 +939,24 @@ func (m *muxStream) emitControl(value json.RawMessage) {
 	case "jobs":
 		m.emitJobs(v.SessionId, v.Jobs)
 	case "projection":
-		m.emitProjection(v.SessionId, v.Key, v.Seq, v.Value)
+		// The live change frame carries every projection key one
+		// committed event moved (each change's value under `val`, the
+		// frame's seq shared across them); emit one legacy frame per
+		// key so the store's per-key guard folds each independently.
+		var fr struct {
+			SessionId string `json:"sessionId"`
+			Seq       int64  `json:"seq"`
+			Changes   []struct {
+				Key string          `json:"key"`
+				Val json.RawMessage `json:"val"`
+			} `json:"changes"`
+		}
+		if json.Unmarshal(value, &fr) != nil {
+			return
+		}
+		for _, ch := range fr.Changes {
+			m.emitProjection(fr.SessionId, ch.Key, fr.Seq, ch.Val)
+		}
 	}
 }
 

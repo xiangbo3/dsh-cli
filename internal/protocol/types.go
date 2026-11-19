@@ -647,8 +647,8 @@ type GoalChangeData struct {
 	} `json:"cleared,omitempty"`
 }
 
-// PermissionOption is one selectable preset of the "permissions" session
-// projection (dsh-permission-presets): a sandbox-mode + approval-policy
+// PermissionOption is one selectable preset of the deployment's preset
+// table (dsh-permission-presets): a sandbox-mode + approval-policy
 // bundle. "custom" appears in the option list only while it is derived.
 type PermissionOption struct {
 	Value       string `json:"value"`
@@ -656,12 +656,25 @@ type PermissionOption struct {
 	Description string `json:"description,omitempty"`
 }
 
-// PermissionProjection is the "permissions" projection view: the
-// deployment's preset table in declaration order plus the currently
-// effective preset.
+// PermissionProjection is the "permissions" session projection view. The
+// host publishes only the currently effective preset here — a knob pair
+// matching no configured preset derives "custom" — so the selectable
+// table must come from PermissionCatalog. Options is the legacy shape
+// (older builds shipped the table inline); it is empty on the current
+// gateway.
 type PermissionProjection struct {
-	Options      []PermissionOption `json:"options"`
+	Options      []PermissionOption `json:"options,omitempty"`
 	CurrentValue string             `json:"currentValue"`
+}
+
+// PermissionCatalog is the permissionPresets/catalog value: the
+// deployment's process-level preset table in declaration order (a live
+// Auto integration appends its entry), plus the default pinned into
+// fresh sessions.
+type PermissionCatalog struct {
+	Options        []PermissionOption `json:"options"`
+	DefaultOptions []PermissionOption `json:"defaultOptions,omitempty"`
+	DefaultPreset  string             `json:"defaultPreset,omitempty"`
 }
 
 // CommandOutcome is the settled result of one host slash-command execution.

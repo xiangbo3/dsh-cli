@@ -59,6 +59,7 @@ var newRoutes = map[string]newRoute{
 	"workspace.archiveSession":      {"workspace/archiveSession", wrapRequest},
 	"skill.list":                    {"skills/list", wrapRequest},
 	"agentPreset.list":              {"agentPresets/list", wrapNone},
+	"permissionPresets.catalog":     {"permissionPresets/catalog", wrapNone},
 	// /mode switch: the upgraded gateway routes by path, so the select
 	// endpoint needs its route here too (args composed in newArgs).
 	"agentPreset.select":    {"agentPresets/select", wrapNone},

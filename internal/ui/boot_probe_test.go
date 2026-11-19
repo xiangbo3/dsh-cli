@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"dsh-cli/internal/app"
-	"dsh-cli/internal/client"
 	"dsh-cli/internal/protocol"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,15 +25,18 @@ func TestBootCtrlPEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	probe := client.New("http://127.0.0.1:3080")
-	pctx, pcancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	if _, err := probe.Describe(pctx); err != nil {
-		t.Skipf("no live server at 127.0.0.1:3080: %v", err)
+	// The stored launch token is the gate (the package TestMain redirects
+	// DSH_CLI_HOME, so no app here carries credentials by itself).
+	a := app.NewWith("http://127.0.0.1:3080", liveToken(t))
+	st := a.Start(ctx)
+	// A tokenless dial only fails after the RPC timeout: the roster
+	// landing is the readiness probe, and its absence is the skip.
+	for i := 0; i < 100 && len(st.Order()) == 0; i++ {
+		time.Sleep(100 * time.Millisecond)
 	}
-	pcancel()
-
-	a := app.New("http://127.0.0.1:3080")
-	a.Start(ctx)
+	if len(st.Order()) == 0 {
+		t.Skip("live host at 127.0.0.1:3080 unreachable or unauthorized")
+	}
 	m := NewModel(a)
 	m.splashOff = true // headless key test: no boot animation
 	prog := tea.NewProgram(m, tea.WithoutRenderer(), tea.WithContext(ctx),
@@ -47,18 +49,17 @@ func TestBootCtrlPEndToEnd(t *testing.T) {
 		// Wait for boot: host + active session picked.
 		deadline := time.Now().Add(10 * time.Second)
 		for i := 0; time.Now().Before(deadline); i++ {
-			hostOK := m.st.Host() != nil
 			act := m.st.Active()
 			if i%20 == 0 {
-				t.Logf("wait poll %d: host=%v active=%q", i, hostOK, act)
+				t.Logf("wait poll %d: active=%q", i, act)
 			}
-			if hostOK && act != "" {
+			if act != "" {
 				t.Log("boot condition met")
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		t.Logf("boot wait over: host=%v active=%q", m.st.Host() != nil, m.st.Active())
+		t.Logf("boot wait over: active=%q", m.st.Active())
 		if perm := permOf(a, a.Store().Active()); perm != nil {
 			t.Logf("initial store permission: current=%q", perm.Current)
 		} else {

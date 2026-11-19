@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.0.55
+
+### Fixed
+
+- The status bar's permission chip now follows a ctrl+p (or /permission)
+  preset switch immediately, instead of lagging behind until the next
+  session reload.
+- ctrl+p now cycles the presets this deployment actually offers — the
+  table is read from the host — instead of a hardcoded three-step guess,
+  so a deployment without a read-only preset, or with an Auto one,
+  cycles correctly.
+- On a session whose history has not loaded yet, a bare `/permission`
+  asks the host for the current preset instead of answering "unknown".
+- The t/s readout no longer goes blank after a reconnect.
+- Turn timers and the t/s readout are no longer thrown off by a host
+  clock that disagrees with yours: the offset is measured and folded in.
+- A stall in the event stream no longer loses conversation lines — the
+  gap is noticed and the missing stretch is fetched back.
+- A connection that stops answering now reconnects instead of leaving
+  the session hanging.
+- The context bar now moves while an answer streams: it follows the
+  host's running forecast for the next request instead of holding at the
+  previous request's size.
+- Very long sessions stay responsive; the screen keeps only the recent
+  conversation.
+- A setting that could not be saved — a language switch, a price edit —
+  now says so in a notice instead of failing silently, and price edits
+  survive a restart.
+- One malformed message no longer takes the whole screen down.
+- A degenerate window size (a torn terminal report, a hairline tmux
+  sliver) no longer garbles or crashes the screen, and an old text
+  selection is dropped on resize instead of copying the wrong text.
+- `ctrl+1`–`ctrl+5` still switch dock tabs while the session window is
+  open.
+
+### 修复
+
+- 状态栏的权限标识现在即时跟随 ctrl+p（或 /permission）的预设切换，
+  不再滞后到下次会话重载才更新。
+- ctrl+p 改为按本机实际提供的预设循环（预设表读自主机），不再用写死的
+  三档；没有 read-only 预设、或带 Auto 预设的部署也能正确循环。
+- 历史尚未加载的会话里单独输入 `/permission`，改为向主机查询当前预设，
+  不再直接回"未知"。
+- 重连后 t/s 读数不再消失。
+- 回合计时与 t/s 不再被主机与本机的时钟差扰乱：偏差会被测算并计入。
+- 事件流出现停顿不再丢失对话内容：断档会被察觉，缺的一段会补拉回来。
+- 连接卡住不再让会话一直挂着，改为走重连流程。
+- 上下文进度条在回答生成过程中会跟着走：改用主机对下一次请求的实时
+  预估，不再停在上一次请求的大小。
+- 超长会话保持流畅：屏上只保留较新的对话内容。
+- 设置保存失败（切换语言、修改价格）现在会提示告知，不再静默；
+  价格修改重启后不再丢失。
+- 单条消息异常不再拖垮整个界面。
+- 畸形窗口尺寸（终端异常上报、极窄的 tmux 分屏）不再让界面错乱或崩溃；
+  调整窗口大小后旧的文本选择会被清除，不再复制到错的内容。
+- 会话窗口打开时 `ctrl+1`–`ctrl+5` 仍可切换侧栏标签。
+
 ## 1.0.54
 
 ### Fixed

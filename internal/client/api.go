@@ -376,6 +376,19 @@ func (c *Client) AgentPresets(ctx context.Context) (*protocol.AgentPresetListRes
 	return &v, nil
 }
 
+// PermissionCatalog reads the deployment's permission preset table from
+// the process-level permissionPresets catalog (dsh-permission-presets).
+// The session's "permissions" projection carries only the current value,
+// so this remote is the only source of the selectable presets and their
+// declaration order. A deployment without the plugin has no such route.
+func (c *Client) PermissionCatalog(ctx context.Context) (*protocol.PermissionCatalog, error) {
+	var v protocol.PermissionCatalog
+	if err := c.call(ctx, "permissionPresets.catalog", struct{}{}, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 // SelectAgentPreset recomposes one session's agent from another preset.
 // Allowed only while the session is blank (no turn has run; the host
 // answers agent-preset-locked otherwise). Returns the preset id now in

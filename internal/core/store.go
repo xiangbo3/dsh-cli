@@ -117,6 +117,15 @@ type Store struct {
 	// the previous model's window until the new model's first request.
 	modelWin map[string]int
 
+	// permCatalog is the cached process-level permission preset table
+	// (permissionPresets/catalog): the session projection publishes only
+	// the current preset, so the cycle order has no other source.
+	// permTried records that a read was attempted; an empty table with
+	// tried set is a deployment without the preset plugin, and the cycle
+	// falls back to the standard table without re-dialing per keypress.
+	permCatalog []protocol.PermissionOption
+	permTried   bool
+
 	dirty   chan struct{}
 	notices chan Notice
 	turnEnd chan *TurnEndInfo
@@ -2009,16 +2018,37 @@ func decodePermission(v json.RawMessage) *protocol.PermissionProjection {
 	return &pp
 }
 
+// PermissionCatalog returns the cached preset table and whether a read
+// has been attempted (an attempted read with no options means the
+// deployment publishes no preset catalog).
+func (s *Store) PermissionCatalog() ([]protocol.PermissionOption, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.permCatalog, s.permTried
+}
+
+// SetPermissionCatalog caches the deployment's preset table; tried=false
+// clears the cache so the next cycle re-reads it (a re-baseline after a
+// host reconnect may have joined a different deployment).
+func (s *Store) SetPermissionCatalog(opts []protocol.PermissionOption, tried bool) {
+	s.mu.Lock()
+	s.permCatalog = opts
+	s.permTried = tried
+	s.mu.Unlock()
+}
+
 // StandardPresets is the canonical DSH sandbox-mode cycle order (dsh-base
-// default preset table). It is the fallback when the deployment does not
-// expose a "permissions" projection.
+// default preset table). It is the last-resort fallback: the deployment's
+// own table comes from the permissionPresets catalog, and guessing a
+// preset the deployment does not configure fails at the host command.
 var StandardPresets = []string{"read-only", "workspace-write", "danger-full-access"}
 
 // NextPermission returns the preset that follows cur in cycle order. The
-// order is the deployment's preset table (projection option order); the
-// derived "custom" entry is never a switch target, so a cycle starting from
-// it (or from any value outside the list) lands on the first option. An
-// empty table cycles StandardPresets.
+// order is the deployment's preset table (catalog option order, else the
+// projection's inline options); the derived "custom" entry is never a
+// switch target, so a cycle starting from it (or from any value outside
+// the list) lands on the first option. An empty table cycles
+// StandardPresets.
 func NextPermission(cur string, opts []protocol.PermissionOption) string {
 	order := make([]string, 0, len(opts))
 	for _, o := range opts {

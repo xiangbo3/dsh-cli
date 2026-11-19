@@ -88,3 +88,32 @@ func TestCommandExecuteWire(t *testing.T) {
 		t.Fatalf("host saw %q, want no images alias", log)
 	}
 }
+
+// TestPermissionCatalogWire pins the preset-table read: the new-dialect
+// route permissionPresets/catalog with an empty args object, and the
+// option table decoded off the value. The session "permissions" projection
+// carries only currentValue, so this remote is the only source of the
+// deployment's preset order the ctrl+p cycle walks.
+func TestPermissionCatalogWire(t *testing.T) {
+	f := newFakeNewHost(t, "tok")
+	c := New(f.URL)
+	c.conn.SetToken("tok")
+	if err := c.conn.Exchange(context.Background(), c.http); err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	cat, err := c.PermissionCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("PermissionCatalog: %v", err)
+	}
+	if len(cat.Options) != 2 || cat.Options[0].Value != "workspace-write" ||
+		cat.Options[1].Name != "Full access" || cat.DefaultPreset != "workspace-write" {
+		t.Fatalf("catalog = %+v, want the two-preset table with its default", cat)
+	}
+	f.mu.Lock()
+	log := strings.Join(f.argLog, " | ")
+	f.mu.Unlock()
+	// One call, no parameters: the route path with an empty args object.
+	if want := "permissionPresets/catalog {}"; !strings.Contains(log, want) {
+		t.Fatalf("host saw %q, want %s", log, want)
+	}
+}
