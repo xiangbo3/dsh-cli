@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The `/model` (`ctrl+n`) window now manages models the way the web
+  settings page does: `f` fetches the provider's served list (as
+  before), and `a` / `e` / `d` add / edit / delete its entries — an
+  edited entry can set the display name, context window and max output.
+
+### 新增
+
+- `/model`（`ctrl+n`）窗口现在可以像 web 设置页一样管理模型：`f`
+  获取端点模型列表（原有），`a` / `e` / `d` 新增 / 编辑 / 删除条目，
+  编辑可改显示名、上下文长度与最大输出。
+
 ## 1.0.55
 
 ### Fixed

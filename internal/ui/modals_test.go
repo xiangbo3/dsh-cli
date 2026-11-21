@@ -232,6 +232,30 @@ func TestModalInputsMatchMainInput(t *testing.T) {
 		t.Fatalf("search empty query missing inverted space: %q", stripANSI(ln))
 	}
 
+	// model entry form: the focused field edits like the main input, the
+	// tab walks the fields (caret on the focused row only).
+	me := newModelEdit(m.loc, "custom", "m1", nil, "deepseek-chat", "DeepSeek")
+	me.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if got := me.edits[0].string(); got != "deepseek-chatx" {
+		t.Fatalf("form insert = %q", got)
+	}
+	me.update(key(tea.KeyCtrlB)) // one back
+	me.update(key(tea.KeyCtrlD)) // delete the "x"
+	if got := me.edits[0].string(); got != "deepseek-chat" {
+		t.Fatalf("form ctrl+d = %q", got)
+	}
+	me.update(key(tea.KeyTab))
+	if me.cur != 1 {
+		t.Fatalf("tab walked to field %d, want 1", me.cur)
+	}
+	me.edits[1].cur = len(me.edits[1].val)
+	if ln := me.view(m, 0, 0)[1]; !strings.Contains(ln, caretSeq+" ") {
+		t.Fatalf("form focused row missing inverted space: %q", stripANSI(ln))
+	}
+	if ln := me.view(m, 0, 0)[0]; strings.Contains(ln, caretSeq) {
+		t.Fatalf("unfocused row carries a caret: %q", stripANSI(ln))
+	}
+
 	// workspace add: the path field shares the bindings and the caret style.
 	wm := &workspaceModal{st: m.st, mode: wsAdd}
 	wm.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/tmp/foo")})

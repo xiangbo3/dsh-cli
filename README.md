@@ -79,7 +79,7 @@ What you see on first launch:
 
 **Switching (each has a hotkey; all work mid-turn)**
 
-- **Model** (`ctrl+n`) — provider → model → reasoning effort, three levels; `←→` cycles the effort; `/model <name>` jumps straight there (a unique prefix works too);
+- **Model** (`ctrl+n`) — provider → model → reasoning effort, three levels; `←→` cycles the effort; `/model <name>` jumps straight there (a unique prefix works too); `f` fetches the provider's served list, and `a` / `e` / `d` add / edit / remove its models (display name, context window, max output), mirroring the web settings page;
 - **Permission** (`ctrl+p`) — cycle read-only → workspace-write → full access; no model turn involved, no waiting;
 - **Mode** (`ctrl+o`) — Standard / PTC / Minimal / Creator plus your own presets; blank sessions apply instantly, running sessions stage it for the next new session;
 - **Workspace** (`ctrl+w`) — add / rename / remove / switch (switching lands on a blank session; one is created if needed).

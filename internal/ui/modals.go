@@ -6,6 +6,7 @@ package ui
 import (
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 
 	"dsh-cli/internal/core"
@@ -1062,9 +1063,9 @@ func (p *modelPicker) update(km tea.KeyMsg) (tea.Cmd, bool) {
 		}
 	case km.Type == tea.KeyEnter:
 		return nil, true
-	case km.String() == "f":
-		// The dispatch owns the fetch; claiming the key here keeps it
-		// from being absorbed as unhandled.
+	case km.String() == "f", km.String() == "a", km.String() == "e", km.String() == "d":
+		// The dispatch owns the fetch and the management keys; claiming
+		// them here keeps them from being absorbed as unhandled.
 		return nil, true
 	case km.Type == tea.KeyEsc:
 		return nil, true
@@ -1193,6 +1194,142 @@ func (p *addModelPicker) view(m *Model, w, h int) []string {
 		lines = append(lines, th.CardStyle(th.Faint()).Render(p.loc.T("addmodel.hint", p.checkedCount())))
 	}
 	return lines
+}
+
+// ---- model entry editor -----------------------------------------------------------
+
+// modelEdit is the add/edit form for one provider model entry — the web
+// settings page's model row in form shape: id, display name, context
+// window, max output. ↑↓/tab walk the fields, enter saves, esc cancels.
+// A blank capacity field leaves the key unset in the stored entry.
+type modelEdit struct {
+	provider string          // provider whose settings entry is written
+	origId   string          // stored entry being replaced ("" = fresh entry)
+	base     json.RawMessage // the stored entry kept while writing (nil for new)
+	edits    [4]lineEdit     // id, name, context window, max output
+	cur      int
+	err      string
+	saving   bool
+	loc      *i18n.Locale
+}
+
+// newModelEdit fills the form from the stored entry (nil base = a fresh
+// one; seedId/seedName are what the catalog already knows).
+func newModelEdit(loc *i18n.Locale, provider, origId string, base json.RawMessage, seedId, seedName string) *modelEdit {
+	e := &modelEdit{loc: loc, provider: provider, origId: origId, base: base}
+	set := func(i int, s string) { e.edits[i] = lineEdit{val: []rune(s), cur: len(s)} }
+	set(0, seedId)
+	set(1, seedName)
+	var stored struct {
+		Name          string      `json:"name"`
+		ContextWindow json.Number `json:"contextWindow"`
+		MaxTokens     json.Number `json:"maxTokens"`
+	}
+	if len(base) > 0 && json.Unmarshal(base, &stored) == nil {
+		if stored.Name != "" {
+			set(1, stored.Name)
+		}
+		set(2, stored.ContextWindow.String())
+		set(3, stored.MaxTokens.String())
+	}
+	return e
+}
+
+// labels are the four field labels, padded to one column so the fields
+// line up.
+func (e *modelEdit) labels() [4]string {
+	raw := [4]string{e.loc.T("moledit.f.id"), e.loc.T("moledit.f.name"), e.loc.T("moledit.f.ctx"), e.loc.T("moledit.f.max")}
+	for i, s := range raw {
+		for plainWidth(s) < 10 {
+			s += " "
+		}
+		raw[i] = s
+	}
+	return raw
+}
+
+func (e *modelEdit) title() string {
+	if e.origId == "" {
+		return e.loc.T("moledit.title.add", e.provider)
+	}
+	return e.loc.T("moledit.title.edit", e.provider)
+}
+
+func (e *modelEdit) hint() string { return e.loc.T("moledit.hint") }
+
+func (e *modelEdit) view(m *Model, w, h int) []string {
+	th := m.th
+	labels := e.labels()
+	lines := make([]string, 0, len(e.edits)+2)
+	for i := range e.edits {
+		lines = append(lines, th.Card().Render("  ")+th.CardStyle(th.Subtle()).Render(labels[i])+cardEditLine(th, i == e.cur, &e.edits[i]))
+	}
+	lines = append(lines, "")
+	switch {
+	case e.saving:
+		lines = append(lines, th.CardStyle(th.Subtle()).Render(e.loc.T("moledit.saving")))
+	case e.err != "":
+		lines = append(lines, th.CardStyle(th.Err()).Render(e.err))
+	}
+	return lines
+}
+
+func (e *modelEdit) update(km tea.KeyMsg) (tea.Cmd, bool) {
+	switch {
+	case km.Type == tea.KeyUp:
+		if e.cur > 0 {
+			e.cur--
+		}
+	case km.Type == tea.KeyDown:
+		if e.cur < len(e.edits)-1 {
+			e.cur++
+		}
+	case km.Type == tea.KeyTab:
+		e.cur = (e.cur + 1) % len(e.edits)
+	case km.Type == tea.KeyEnter, km.Type == tea.KeyEsc:
+		// The dispatch saves (after validating) or closes.
+		return nil, true
+	default:
+		// Field text: the main input box's editor semantics.
+		e.edits[e.cur].handleKey(km)
+	}
+	return nil, false
+}
+
+func (e *modelEdit) mouseFields(m *Model) []editField {
+	labels := e.labels()
+	fields := make([]editField, 0, len(e.edits))
+	for i := range e.edits {
+		fields = append(fields, editField{e: &e.edits[i], row: i,
+			prefix: m.th.Card().Render("  ") + m.th.CardStyle(m.th.Subtle()).Render(labels[i])})
+	}
+	return fields
+}
+
+func (e *modelEdit) paste(text string) bool { return e.edits[e.cur].paste(text) }
+
+// values returns the validated draft: trimmed id and name, the two
+// capacities (0 = unset); err is set when the draft must not save.
+func (e *modelEdit) values() (id, name string, ctxWin, maxTok int64, err string) {
+	id = strings.TrimSpace(e.edits[0].string())
+	if id == "" {
+		return "", "", 0, 0, e.loc.T("moledit.err.id")
+	}
+	nums := []*int64{&ctxWin, &maxTok}
+	msgs := [2]string{e.loc.T("moledit.err.ctx"), e.loc.T("moledit.err.max")}
+	for i, f := range []int{2, 3} {
+		s := strings.TrimSpace(e.edits[f].string())
+		if s == "" {
+			continue
+		}
+		n, perr := strconv.ParseInt(s, 10, 64)
+		if perr != nil || n <= 0 {
+			return "", "", 0, 0, msgs[i]
+		}
+		*nums[i] = n
+	}
+	name = strings.TrimSpace(e.edits[1].string())
+	return id, name, ctxWin, maxTok, ""
 }
 
 // ---- rename ---------------------------------------------------------------------

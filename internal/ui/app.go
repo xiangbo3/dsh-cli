@@ -324,6 +324,33 @@ type modelsFetchedMsg struct {
 type modelsRefreshMsg struct {
 	id string
 }
+
+// modelEntryMsg carries one stored model entry back to the picker (raw is
+// nil when the provider's settings do not list it yet; the edit form then
+// opens on a fresh override entry).
+type modelEntryMsg struct {
+	provider string
+	modelID  string
+	display  string
+	raw      json.RawMessage
+	err      string
+}
+
+// modelSavedMsg / modelDeletedMsg report an add/edit/remove write to the
+// provider's stored models (err != "" when the write failed).
+type modelSavedMsg struct {
+	id       string // session id for the catalog refresh
+	provider string
+	name     string
+	created  bool
+	err      string
+}
+type modelDeletedMsg struct {
+	id       string
+	provider string
+	name     string
+	err      string
+}
 type skillsLoadedMsg struct {
 	id     string
 	skills []protocol.SkillEntry
@@ -948,6 +975,45 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, ok := m.topModal().(*addModelPicker); ok {
 			m.closeModal()
 		}
+		return m, tea.Batch(m.cmdCatalog(msg.id), m.cmdModelWindows())
+
+	case modelEntryMsg:
+		// The `e` key's stored entry: it prefills the edit form (the
+		// picker is still on top; a failed read says why and keeps it).
+		if _, ok := m.topModal().(*modelPicker); !ok {
+			return m, nil
+		}
+		if msg.err != "" {
+			m.addToast(core.Notice{Level: "warn", Text: msg.err})
+			return m, nil
+		}
+		m.openModal(newModelEdit(m.loc, msg.provider, msg.modelID, msg.raw, msg.modelID, msg.display))
+		return m, nil
+
+	case modelSavedMsg:
+		if ed, ok := m.topModal().(*modelEdit); ok {
+			ed.saving = false
+		}
+		if msg.err != "" {
+			m.addToast(core.Notice{Level: "err", Text: msg.err, Bell: true})
+			return m, nil
+		}
+		if _, ok := m.topModal().(*modelEdit); ok {
+			m.closeModal()
+		}
+		key := "model.updated"
+		if msg.created {
+			key = "model.created"
+		}
+		m.addToast(core.Notice{Level: "ok", Text: m.loc.T(key, msg.name, msg.provider)})
+		return m, tea.Batch(m.cmdCatalog(msg.id), m.cmdModelWindows())
+
+	case modelDeletedMsg:
+		if msg.err != "" {
+			m.addToast(core.Notice{Level: "warn", Text: msg.err})
+			return m, nil
+		}
+		m.addToast(core.Notice{Level: "ok", Text: m.loc.T("model.deleted", msg.name, msg.provider)})
 		return m, tea.Batch(m.cmdCatalog(msg.id), m.cmdModelWindows())
 
 	case skillsLoadedMsg:
@@ -3383,6 +3449,189 @@ func (m *Model) cmdAddModels(mod *addModelPicker) tea.Cmd {
 	}
 }
 
+// cmdLoadModelEntry reads the stored settings entry behind the picker's
+// cursor row (`e` prefills the edit form with it; a provider without
+// settings or without the entry opens the form on a fresh override).
+func (m *Model) cmdLoadModelEntry(provider, modelID, display string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		msg := modelEntryMsg{provider: provider, modelID: modelID, display: display}
+		desc, err := m.app.SettingsDescribe(ctx)
+		if err != nil {
+			msg.err = errText(err, "settings")
+			return msg
+		}
+		ns, path := m.locateProviderSettings(ctx, desc, provider)
+		if ns == "" {
+			msg.err = m.loc.T("model.no.settings", provider)
+			return msg
+		}
+		cur, _ := settingPathValue(desc, ns, append(append([]string{}, path...), "models"))
+		msg.raw = findModelEntry(cur, modelID)
+		return msg
+	}
+}
+
+// cmdSaveModel writes the form's entry into the provider's stored models
+// — replacing the entry drafted from, appending a fresh one — and reports
+// through modelSavedMsg.
+func (m *Model) cmdSaveModel(mod *modelEdit, modelID, name string, ctxWin, maxTok int64) tea.Cmd {
+	provider, origId, base := mod.provider, mod.origId, mod.base
+	sess := m.activeID()
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res := modelSavedMsg{id: sess, provider: provider, name: modelID, created: origId == ""}
+		entry, err := mergeModelEntry(base, modelID, name, ctxWin, maxTok)
+		if err != nil {
+			res.err = errText(err, "model entry")
+			return res
+		}
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			res.err = errText(err, "model entry")
+			return res
+		}
+		desc, err := m.app.SettingsDescribe(ctx)
+		if err != nil {
+			res.err = errText(err, "settings")
+			return res
+		}
+		ns, path := m.locateProviderSettings(ctx, desc, provider)
+		if ns == "" {
+			res.err = m.loc.T("model.no.settings", provider)
+			return res
+		}
+		var existing []json.RawMessage
+		if cur, ok := settingPathValue(desc, ns, append(append([]string{}, path...), "models")); ok {
+			_ = json.Unmarshal(cur, &existing)
+		}
+		out := make([]json.RawMessage, 0, len(existing)+1)
+		replaced := false
+		for _, e := range existing {
+			if origId != "" && !replaced && modelEntryID(e) == origId {
+				out = append(out, raw)
+				replaced = true
+				continue
+			}
+			out = append(out, e)
+		}
+		if !replaced {
+			out = append(out, raw)
+		}
+		opts := append(append([]string{}, path...), "models")
+		if _, err := m.app.SettingsMutate(ctx, ns, []protocol.SettingOp{{Op: "set", Path: opts, Value: out}}); err != nil {
+			res.err = errText(err, "save model")
+			return res
+		}
+		res.err = ""
+		return res
+	}
+}
+
+// cmdDeleteModel drops the picker's cursor entry from the provider's
+// stored models (a model the settings never listed has nothing to
+// remove, and says so).
+func (m *Model) cmdDeleteModel(provider, modelID string) tea.Cmd {
+	sess := m.activeID()
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res := modelDeletedMsg{id: sess, provider: provider, name: modelID}
+		desc, err := m.app.SettingsDescribe(ctx)
+		if err != nil {
+			res.err = errText(err, "settings")
+			return res
+		}
+		ns, path := m.locateProviderSettings(ctx, desc, provider)
+		if ns == "" {
+			res.err = m.loc.T("model.no.settings", provider)
+			return res
+		}
+		var existing []json.RawMessage
+		if cur, ok := settingPathValue(desc, ns, append(append([]string{}, path...), "models")); ok {
+			_ = json.Unmarshal(cur, &existing)
+		}
+		out := make([]json.RawMessage, 0, len(existing))
+		removed := false
+		for _, e := range existing {
+			if !removed && modelEntryID(e) == modelID {
+				removed = true
+				continue
+			}
+			out = append(out, e)
+		}
+		if !removed {
+			res.err = m.loc.T("model.not.stored", modelID, provider)
+			return res
+		}
+		opts := append(append([]string{}, path...), "models")
+		if _, err := m.app.SettingsMutate(ctx, ns, []protocol.SettingOp{{Op: "set", Path: opts, Value: out}}); err != nil {
+			res.err = errText(err, "remove model")
+			return res
+		}
+		res.err = ""
+		return res
+	}
+}
+
+// modelEntryID reads the id out of one stored models entry ("" on junk).
+func modelEntryID(raw json.RawMessage) string {
+	var e struct {
+		Id string `json:"id"`
+	}
+	if json.Unmarshal(raw, &e) != nil {
+		return ""
+	}
+	return e.Id
+}
+
+// findModelEntry returns the stored entry with this id (nil when the
+// models array does not list it).
+func findModelEntry(models json.RawMessage, id string) json.RawMessage {
+	var entries []json.RawMessage
+	if json.Unmarshal(models, &entries) != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if modelEntryID(e) == id {
+			return e
+		}
+	}
+	return nil
+}
+
+// mergeModelEntry folds the edited fields into the stored entry — fields
+// the form does not carry (modalities, reasoning) stay as stored; an
+// empty name or a zero capacity clears its key. A nil base starts a
+// fresh entry.
+func mergeModelEntry(base json.RawMessage, id, name string, ctxWin, maxTok int64) (map[string]any, error) {
+	entry := map[string]any{}
+	if len(base) > 0 {
+		if err := json.Unmarshal(base, &entry); err != nil {
+			return nil, err
+		}
+	}
+	entry["id"] = id
+	if name == "" {
+		delete(entry, "name")
+	} else {
+		entry["name"] = name
+	}
+	for _, f := range []struct {
+		key string
+		val int64
+	}{{"contextWindow", ctxWin}, {"maxTokens", maxTok}} {
+		if f.val == 0 {
+			delete(entry, f.key)
+		} else {
+			entry[f.key] = f.val
+		}
+	}
+	return entry, nil
+}
+
 // locateProviderSettings finds where a provider's models live in the
 // settings: the new host's provider directory first, a describe-value
 // scan (providers entry) for the legacy wire.
@@ -3755,6 +4004,22 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 		if km.String() == "f" {
 			return m.cmdFetchModels(mod), true
 		}
+		if !mod.loading && len(mod.rows) > 0 {
+			switch km.String() {
+			case "a":
+				// Manage the cursor row's provider: a fresh entry the
+				// endpoint discovery never surfaced.
+				ed := newModelEdit(m.loc, mod.rows[mod.cur].providerID, "", nil, "", "")
+				m.openModal(ed)
+				return nil, true
+			case "e":
+				r := mod.rows[mod.cur]
+				return m.cmdLoadModelEntry(r.providerID, r.modelID, r.display), true
+			case "d":
+				r := mod.rows[mod.cur]
+				return m.cmdDeleteModel(r.providerID, r.modelID), true
+			}
+		}
 		if km.Type == tea.KeyEnter {
 			if mod.loading {
 				// The catalog is still in flight: confirming now would
@@ -3822,6 +4087,35 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 				mod.cur++
 			}
 			return nil, true
+		}
+		if km.Type == tea.KeyEsc {
+			m.closeModal()
+		}
+	case *modelEdit:
+		if km.Type == tea.KeyEnter {
+			if mod.saving {
+				return nil, true
+			}
+			modelID, name, ctxWin, maxTok, verr := mod.values()
+			if verr != "" {
+				mod.err = verr
+				return nil, true
+			}
+			// A fresh entry must not shadow a model the roster already
+			// lists for the provider (the picker sits right under the form).
+			if mod.origId == "" && len(m.mods) >= 2 {
+				if pk, ok := m.mods[len(m.mods)-2].(*modelPicker); ok {
+					for _, r := range pk.rows {
+						if r.providerID == mod.provider && r.modelID == modelID {
+							mod.err = m.loc.T("model.exists", modelID, mod.provider)
+							return nil, true
+						}
+					}
+				}
+			}
+			mod.err = ""
+			mod.saving = true
+			return m.cmdSaveModel(mod, modelID, name, ctxWin, maxTok), true
 		}
 		if km.Type == tea.KeyEsc {
 			m.closeModal()
