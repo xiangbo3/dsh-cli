@@ -217,6 +217,23 @@ func TestCsiuKey(t *testing.T) {
 		{"\x1b[127u", tea.KeyMsg{Type: tea.KeyBackspace}, true},                     // ditto, backspace
 		{"\x1b[99;5:1u", tea.KeyMsg{Type: tea.KeyCtrlC}, true},                      // event-type sub-field
 		{"\x1b[97:97;1u", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, true}, // alternate-key sub-field
+		{"\x1b[49;5u", tea.KeyMsg{Type: keyCtrlDigit1}, true},                       // ctrl+1: the dock/side chord
+		{"\x1b[55;5u", tea.KeyMsg{Type: keyCtrlDigit7}, true},                       // ctrl+7
+		// The numpad once disambiguation is on: kitty's keysyms must
+		// type and navigate like the main row.
+		{"\x1b[57399u", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}}, true},   // KP 0
+		{"\x1b[57404;2u", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}}, true}, // shift+KP 5
+		{"\x1b[57404;5u", tea.KeyMsg{Type: keyCtrlDigit5}, true},                    // ctrl+KP 5
+		{"\x1b[57409u", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}}, true},   // KP decimal
+		{"\x1b[57414u", tea.KeyMsg{Type: tea.KeyEnter}, true},                       // KP enter
+		{"\x1b[57414;3u", tea.KeyMsg{Type: tea.KeyEnter, Alt: true}, true},          // alt+KP enter: queue
+		{"\x1b[57419u", tea.KeyMsg{Type: tea.KeyUp}, true},                          // KP up (NumLock off)
+		{"\x1b[57419;2u", tea.KeyMsg{Type: tea.KeyShiftUp}, true},                   // shift+KP up
+		{"\x1b[57421u", tea.KeyMsg{Type: tea.KeyPgUp}, true},                        // KP prior
+		{"\x1b[57424u", tea.KeyMsg{Type: tea.KeyEnd}, true},                         // KP end
+		{"\x1b[57426u", tea.KeyMsg{Type: tea.KeyDelete}, true},                      // KP delete
+		{"\x1b[57376u", tea.KeyMsg{}, false},                                        // F13: still unnamed
+		{"\x1b[57425u", tea.KeyMsg{}, false},                                        // KP insert: unbound
 		{"\x1b[u", tea.KeyMsg{}, false},                                             // no keycode at all
 		{"\x1b[;5u", tea.KeyMsg{}, false},                                           // no keycode before the modifier
 		{"\x1b[99;3A", tea.KeyMsg{}, false},                                         // legacy modified arrow

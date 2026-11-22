@@ -1297,6 +1297,49 @@ func modKey(mod, sym int) (tea.KeyMsg, bool) {
 	alt := mod >= 3 && mod != 5
 	ctrl := mod >= 5
 
+	// Kitty's numpad keysyms: under disambiguation a terminal sends the
+	// NumLock'd numpad (and the numpad arrows, page keys and friends
+	// with NumLock off) as ESC[57399u and up. Folded onto the codepoints
+	// and keysyms below they type and navigate like the main row;
+	// unfolded they name nothing and the numpad goes dead in the app
+	// that asked for the mode.
+	switch sym {
+	case 57399, 57400, 57401, 57402, 57403, 57404, 57405, 57406, 57407, 57408:
+		sym += 48 - 57399 // KP 0..9
+	case 57409:
+		sym = '.' // KP decimal
+	case 57410:
+		sym = '/' // KP divide
+	case 57411:
+		sym = '*' // KP multiply
+	case 57412:
+		sym = '-' // KP subtract
+	case 57413:
+		sym = '+' // KP add
+	case 57414:
+		sym = 13 // KP enter
+	case 57415:
+		sym = '=' // KP equal
+	case 57417:
+		sym = 4 // KP left
+	case 57418:
+		sym = 3 // KP right
+	case 57419:
+		sym = 1 // KP up
+	case 57420:
+		sym = 2 // KP down
+	case 57421:
+		sym = 5 // KP prior
+	case 57422:
+		sym = 6 // KP next
+	case 57423:
+		sym = 7 // KP home
+	case 57424:
+		sym = 8 // KP end
+	case 57426:
+		sym = 10 // KP delete
+	}
+
 	if sym >= 97 && sym <= 122 { // a-z
 		ch := rune(sym)
 		switch {

@@ -20,11 +20,16 @@
 - esc works again in terminals that send the bare Escape key as
   `CSI 27u` (alacritty): the key was dropped, so esc closed no popup
   and cancelled nothing.
+- The numeric keypad types and navigates again in those same terminals:
+  its digits, operators, arrows and page keys were swallowed instead of
+  reaching the input line.
 
 ### 修复
 
 - esc 在把 Escape 发成 `CSI 27u` 的终端（alacritty）里恢复可用：此前
   这个键被丢弃，esc 关不掉弹窗也中断不了回合。
+- 同一批终端里数字小键盘恢复可用：小键盘的数字、运算符、方向、翻页键
+  此前被丢弃，进不了输入行。
 
 ## 1.0.55
 
