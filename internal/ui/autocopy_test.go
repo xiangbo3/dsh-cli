@@ -210,11 +210,19 @@ func TestCsiuKey(t *testing.T) {
 		{"\x1b[5;1u", tea.KeyMsg{Type: tea.KeyPgUp}, true},
 		{"\x1b[7;2u", tea.KeyMsg{Type: tea.KeyHome}, true},
 		{"\x1b[10;5u", tea.KeyMsg{Type: tea.KeyDelete}, true},
-		{"\x1b[99u", tea.KeyMsg{}, false},      // no modifier field
-		{"\x1b[99;3A", tea.KeyMsg{}, false},    // legacy modified arrow
-		{"\x1b[1;6A", tea.KeyMsg{}, false},     // legacy modified arrow
-		{"\x1b[27;5;99~", tea.KeyMsg{}, false}, // the MOK2 form
-		{"\x1b[5;99~", tea.KeyMsg{}, false},    // ~ terminator, not u
+		{"\x1b[99u", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}, true},      // modifier omitted
+		{"\x1b[27u", tea.KeyMsg{Type: tea.KeyEsc}, true},                            // alacritty's Escape
+		{"\x1b[9u", tea.KeyMsg{Type: tea.KeyTab}, true},                             // ditto, tab
+		{"\x1b[13u", tea.KeyMsg{Type: tea.KeyEnter}, true},                          // ditto, enter
+		{"\x1b[127u", tea.KeyMsg{Type: tea.KeyBackspace}, true},                     // ditto, backspace
+		{"\x1b[99;5:1u", tea.KeyMsg{Type: tea.KeyCtrlC}, true},                      // event-type sub-field
+		{"\x1b[97:97;1u", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, true}, // alternate-key sub-field
+		{"\x1b[u", tea.KeyMsg{}, false},                                             // no keycode at all
+		{"\x1b[;5u", tea.KeyMsg{}, false},                                           // no keycode before the modifier
+		{"\x1b[99;3A", tea.KeyMsg{}, false},                                         // legacy modified arrow
+		{"\x1b[1;6A", tea.KeyMsg{}, false},                                          // legacy modified arrow
+		{"\x1b[27;5;99~", tea.KeyMsg{}, false},                                      // the MOK2 form
+		{"\x1b[5;99~", tea.KeyMsg{}, false},                                         // ~ terminator, not u
 	}
 	for _, tc := range cases {
 		got, ok := csiuKey([]byte(tc.seq))
@@ -228,6 +236,36 @@ func TestCsiuKey(t *testing.T) {
 	}
 	if csiuShiftEnter([]byte("\x1b[13;3u")) || csiuShiftEnter([]byte("\x1b[27;2;13~")) {
 		t.Error("csiuShiftEnter over-matches (alt+enter is the queue chord)")
+	}
+}
+
+// TestCsiuBareEscape is the alacritty regression: the disambiguate flag
+// dsh-cli asks for makes the terminal send the bare Escape key as
+// ESC[27u, and that byte must drive every esc binding. The dock close
+// and the help window stand in for the whole esc family (popups, the
+// interrupt, the selection); a decoder that demanded the modifier
+// field dropped the key and esc looked dead in the terminal.
+func TestCsiuBareEscape(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	m := NewModel(app.New("http://127.0.0.1:3999"))
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m.Update(csiMsg("\x1b[116;5u")) // ctrl+t
+	if !m.dockVisible {
+		t.Fatal("ctrl+t must open the dock")
+	}
+	m.Update(csiMsg("\x1b[27u"))
+	if m.dockVisible {
+		t.Fatal("bare CSI-u esc must close the dock")
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
+	if m.topModal() == nil {
+		t.Fatal("ctrl+h must open the help window")
+	}
+	m.Update(csiMsg("\x1b[27u"))
+	if m.topModal() != nil {
+		t.Fatal("bare CSI-u esc must close the help window")
 	}
 }
 

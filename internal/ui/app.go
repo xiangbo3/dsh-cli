@@ -1168,20 +1168,39 @@ func byteMsgOf(msg tea.Msg) []byte {
 // 2 shift, 3 alt, 5 ctrl, 6 ctrl+shift, 9..16 super): tmux re-encodes
 // modified keys this way with the MOK2 values preserved, so the values
 // feed modKey unconverted.
+//
+// The spec lets a terminal omit the modifier when it is 1, and alacritty
+// takes it: the moment dsh-cli asks for disambiguation its Escape key
+// arrives as ESC[27u, so a missing field reads as unmodified — a parser
+// that demanded two fields would eat the key whole.
 func csiuParse(seq []byte) (sym, mod int, ok bool) {
 	if len(seq) < 4 || seq[0] != '\x1b' || seq[1] != '[' || seq[len(seq)-1] != 'u' {
 		return 0, 0, false
 	}
 	parts := strings.Split(string(seq[2:len(seq)-1]), ";")
-	if len(parts) != 2 {
+	sym, err := csiuField(parts[0])
+	if err != nil {
 		return 0, 0, false
 	}
-	sym, err1 := strconv.Atoi(string(parts[0]))
-	mod, err2 := strconv.Atoi(string(parts[1]))
-	if err1 != nil || err2 != nil || mod < 1 || mod > 16 {
+	mod = 1
+	if len(parts) > 1 {
+		if mod, err = csiuField(parts[1]); err != nil {
+			return 0, 0, false
+		}
+	}
+	if mod < 1 || mod > 16 {
 		return 0, 0, false
 	}
 	return sym, mod, true
+}
+
+// csiuField reads one CSI-u parameter's leading number. The colon
+// sub-fields (alternate key, event type, associated text) belong to
+// flags dsh-cli never pushes, so they are dropped rather than voiding
+// the key.
+func csiuField(f string) (int, error) {
+	base, _, _ := strings.Cut(f, ":")
+	return strconv.Atoi(base)
 }
 
 // csiuKey decodes a kitty-protocol CSI-u escape the way the legacy
