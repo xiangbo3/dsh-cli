@@ -1,19 +1,34 @@
 # Changelog
 
-## Unreleased
+## 1.0.56
 
 ### Added
 
 - The `/model` (`ctrl+n`) window now manages models the way the web
   settings page does: `f` fetches the provider's served list (as
   before), and `a` / `e` / `d` add / edit / delete its entries — an
-  edited entry can set the display name, context window and max output.
+  edited entry can set the display name, context window, max output
+  and input types (text / image).
+- Adding a workspace (`ctrl+w`) with an absolute path the host lacks
+  now asks whether to create the directory; yes creates the missing
+  levels and adds it.
 
 ### 新增
 
 - `/model`（`ctrl+n`）窗口现在可以像 web 设置页一样管理模型：`f`
   获取端点模型列表（原有），`a` / `e` / `d` 新增 / 编辑 / 删除条目，
-  编辑可改显示名、上下文长度与最大输出。
+  编辑可改显示名、上下文长度、最大输出与输入类型（文本/图片）。
+- 工作区窗口（`ctrl+w`）添加不存在的绝对路径时会询问是否创建目录；
+  确认创建后自动补齐缺失层级并添加。
+
+### Changed
+
+- The workspace window's add row is now just "add workspace" /
+  "添加工作区", without the "(existing directory)" suffix.
+
+### 变更
+
+- 工作区窗口的添加入口改为“添加工作区”，去掉“（已有目录）”后缀。
 
 ### Fixed
 

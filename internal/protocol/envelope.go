@@ -47,6 +47,15 @@ type RpcError struct {
 
 func (e *RpcError) Error() string { return "rpc " + e.Code + ": " + e.Message }
 
+// Directory picker codes — the failures host.listDirectory and
+// host.createDirectory answer with (unreadable covers a directory that
+// is not there).
+const (
+	DirUnreadable = "directory-picker/unreadable"
+	DirExists     = "directory-picker/exists"
+	DirCreateFail = "directory-picker/create-failed"
+)
+
 // NewRPCId mints a UUID v4 correlation id.
 func NewRPCId() string {
 	b := make([]byte, 16)

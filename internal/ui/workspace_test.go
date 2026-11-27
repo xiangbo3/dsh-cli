@@ -4,9 +4,13 @@
 package ui
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"dsh-cli/internal/app"
+	"dsh-cli/internal/i18n"
 	"dsh-cli/internal/protocol"
 
 	"github.com/charmbracelet/bubbletea"
@@ -133,4 +137,93 @@ func TestWorkspaceModalInputDoesNotAutoSubmit(t *testing.T) {
 	if top, ok := m.topModal().(*workspaceModal); !ok || top != mod {
 		t.Fatalf("top modal changed: %T", m.topModal())
 	}
+}
+
+// TestWorkspaceAddMissingDir: an absolute path the host cannot list
+// flips the add line into a create confirmation — esc returns to the
+// (kept, editable) path, y creates the missing segments on the host and
+// runs the add. An existing directory adds without any prompt.
+func TestWorkspaceAddMissingDir(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fh := newFakeHost(t)
+	fh.dirs = map[string]bool{"/tmp": true}
+	a := app.New(fh.URL)
+	a.Start(ctx)
+	m := NewModel(a)
+	m.loc = i18n.English()
+	m.W, m.H = 100, 30
+
+	// openAdd opens the browser, types the path and returns the probe
+	// cmd enter submitted.
+	openAdd := func(dir string) *workspaceModal {
+		t.Helper()
+		m.openWorkspace()
+		mod, ok := m.topModal().(*workspaceModal)
+		if !ok {
+			t.Fatalf("top modal = %T", m.topModal())
+		}
+		if _, handled := m.handleModalKey(keyRunes("a")); !handled {
+			t.Fatal("a not handled")
+		}
+		for _, ch := range dir {
+			m.handleModalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		}
+		cmd, _ := m.handleModalKey(tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatal("enter should return the probe cmd")
+		}
+		if got := mod.input.string(); got != dir {
+			t.Fatalf("typed path = %q, want %q", got, dir)
+		}
+		m.Update(cmd()) // the probe answer: confirmation, or add + close
+		return mod
+	}
+
+	mod := openAdd("/tmp/new/proj")
+	if mod.mode != wsMkdir || mod.mkdirPath != "/tmp/new/proj" {
+		t.Fatalf("after probe: mode=%d path=%q (want the create confirmation)", mod.mode, mod.mkdirPath)
+	}
+	face := strings.Join(mod.view(m, 90, 0), "\n")
+	if !strings.Contains(face, "/tmp/new/proj") || !strings.Contains(face, "does not exist") {
+		t.Fatalf("confirmation face = %q", stripANSI(face))
+	}
+
+	// esc: back to the line, the typed path kept for editing.
+	if _, handled := m.handleModalKey(tea.KeyMsg{Type: tea.KeyEsc}); !handled {
+		t.Fatal("esc not handled on the confirmation")
+	}
+	if mod.mode != wsAdd || mod.input.string() != "/tmp/new/proj" {
+		t.Fatalf("after esc: mode=%d input=%q", mod.mode, mod.input.string())
+	}
+
+	// Re-confirm, then y: the host gets one createDirectory per missing
+	// segment and the add runs under it.
+	cmd, _ := m.handleModalKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m.Update(cmd())
+	if mod.mode != wsMkdir {
+		t.Fatalf("mode=%d (want the confirmation again)", mod.mode)
+	}
+	cmd, _ = m.handleModalKey(keyRunes("y"))
+	if cmd == nil {
+		t.Fatal("y should return the create+add cmd")
+	}
+	cmd()
+	fh.mu.Lock()
+	made := append([]string{}, fh.made...)
+	fh.mu.Unlock()
+	if len(made) != 2 || made[0] != "/tmp/new" || made[1] != "/tmp/new/proj" {
+		t.Fatalf("host directories created = %v", made)
+	}
+	if len(m.mods) != 0 {
+		t.Fatalf("modal still open after y: %d", len(m.mods))
+	}
+
+	// An existing directory: the probe answer adds straight through, no
+	// confirmation face.
+	mod = openAdd("/tmp")
+	if len(m.mods) != 0 {
+		t.Fatalf("existing dir left %d modals open", len(m.mods))
+	}
+	_ = mod
 }

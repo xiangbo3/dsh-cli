@@ -1016,6 +1016,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addToast(core.Notice{Level: "ok", Text: m.loc.T("model.deleted", msg.name, msg.provider)})
 		return m, tea.Batch(m.cmdCatalog(msg.id), m.cmdModelWindows())
 
+	case wsDirCheckMsg:
+		// The workspace add's probe answer: a missing directory opens
+		// the create confirmation, anything else runs the plain add (the
+		// modal moved on while the probe ran: drop).
+		wk, ok := m.topModal().(*workspaceModal)
+		if !ok || wk.mode != wsAdd {
+			return m, nil
+		}
+		if msg.missing {
+			wk.mkdirPath = msg.dir
+			wk.mode = wsMkdir
+			return m, nil
+		}
+		m.closeModal()
+		return m, m.cmdWorkspaceAdd(msg.dir)
+
 	case skillsLoadedMsg:
 		// The fetch ran off the event loop; store the result (negative
 		// cache included), then re-merge the menu from the fresh cache.
@@ -3540,21 +3556,12 @@ func (m *Model) cmdLoadModelEntry(provider, modelID, display string) tea.Cmd {
 // through modelSavedMsg.
 func (m *Model) cmdSaveModel(mod *modelEdit, modelID, name string, ctxWin, maxTok int64) tea.Cmd {
 	provider, origId, base := mod.provider, mod.origId, mod.base
+	input, inputDirty := mod.selInput(), mod.inputDirty
 	sess := m.activeID()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		res := modelSavedMsg{id: sess, provider: provider, name: modelID, created: origId == ""}
-		entry, err := mergeModelEntry(base, modelID, name, ctxWin, maxTok)
-		if err != nil {
-			res.err = errText(err, "model entry")
-			return res
-		}
-		raw, err := json.Marshal(entry)
-		if err != nil {
-			res.err = errText(err, "model entry")
-			return res
-		}
 		desc, err := m.app.SettingsDescribe(ctx)
 		if err != nil {
 			res.err = errText(err, "settings")
@@ -3563,6 +3570,16 @@ func (m *Model) cmdSaveModel(mod *modelEdit, modelID, name string, ctxWin, maxTo
 		ns, path := m.locateProviderSettings(ctx, desc, provider)
 		if ns == "" {
 			res.err = m.loc.T("model.no.settings", provider)
+			return res
+		}
+		entry, err := mergeModelEntry(base, modelID, name, ctxWin, maxTok, ns, input, inputDirty)
+		if err != nil {
+			res.err = errText(err, "model entry")
+			return res
+		}
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			res.err = errText(err, "model entry")
 			return res
 		}
 		var existing []json.RawMessage
@@ -3665,10 +3682,11 @@ func findModelEntry(models json.RawMessage, id string) json.RawMessage {
 }
 
 // mergeModelEntry folds the edited fields into the stored entry — fields
-// the form does not carry (modalities, reasoning) stay as stored; an
-// empty name or a zero capacity clears its key. A nil base starts a
-// fresh entry.
-func mergeModelEntry(base json.RawMessage, id, name string, ctxWin, maxTok int64) (map[string]any, error) {
+// the form does not carry (reasoning) stay as stored; an empty name or
+// a zero capacity clears its key; the input types are written only once
+// a toggle touched them, under the key the route's settings use (the
+// web editor's convention). A nil base starts a fresh entry.
+func mergeModelEntry(base json.RawMessage, id, name string, ctxWin, maxTok int64, ns string, input []string, inputDirty bool) (map[string]any, error) {
 	entry := map[string]any{}
 	if len(base) > 0 {
 		if err := json.Unmarshal(base, &entry); err != nil {
@@ -3689,6 +3707,24 @@ func mergeModelEntry(base json.RawMessage, id, name string, ctxWin, maxTok int64
 			delete(entry, f.key)
 		} else {
 			entry[f.key] = f.val
+		}
+	}
+	if inputDirty {
+		key := "inputModalities"
+		if ns == "llm-pi-ai" {
+			key = "input"
+		}
+		delete(entry, "inputModalities")
+		delete(entry, "input")
+		entry[key] = input
+		image := false
+		for _, mo := range input {
+			image = image || mo == "image"
+		}
+		if key == "inputModalities" && !image {
+			// Dropping the image input drops its knobs (the web does).
+			delete(entry, "imagePixelBudget")
+			delete(entry, "imageMaxBytes")
 		}
 	}
 	return entry, nil
@@ -4223,11 +4259,12 @@ func (m *Model) handleModalKey(km tea.KeyMsg) (tea.Cmd, bool) {
 		}
 	case *workspaceModal:
 		// Only the commit keys act on the wire: Enter, plus y while the
-		// delete confirmation is open (it is a rune, not a chord). Every
-		// other handled key merely adjusts the modal's state — plain
-		// typing in the add/rename lines must not submit.
+		// delete or the create-directory confirmation is open (it is a
+		// rune, not a chord). Every other handled key merely adjusts the
+		// modal's state — plain typing in the add/rename lines must not
+		// submit.
 		if km.Type == tea.KeyEnter ||
-			(mod.mode == wsDelete && km.Type == tea.KeyRunes && km.String() == "y") {
+			(mod.mode == wsDelete || mod.mode == wsMkdir) && km.Type == tea.KeyRunes && km.String() == "y" {
 			return m.workspacePerform(mod)
 		}
 		// esc closes from the pick face; the same key in the sub-modes

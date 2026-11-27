@@ -599,6 +599,33 @@ func (a *App) pinDefaultPreset(ctx context.Context, req *protocol.SessionCreateR
 	}
 }
 
+// HostDirMissing probes a host directory through the picker listing:
+// missing is true only when the host answers that the level cannot be
+// read (the code a directory that is not there carries); other probe
+// failures ride as err.
+func (a *App) HostDirMissing(ctx context.Context, dirPath string) (bool, error) {
+	err := a.cli.HostListDir(ctx, dirPath)
+	if err == nil {
+		return false, nil
+	}
+	var re *protocol.RpcError
+	if errors.As(err, &re) && re.Code == protocol.DirUnreadable {
+		return true, nil
+	}
+	return false, err
+}
+
+// HostMakeDir creates one host child directory under an existing parent
+// (a target that raced into existence answers DirExists and counts ok).
+func (a *App) HostMakeDir(ctx context.Context, parent, name string) error {
+	err := a.cli.HostMakeDir(ctx, parent, name)
+	var re *protocol.RpcError
+	if errors.As(err, &re) && re.Code == protocol.DirExists {
+		return nil
+	}
+	return err
+}
+
 // WorkspaceCreate registers an existing directory as a workspace
 // (idempotent) and installs the row in the registry mirror.
 func (a *App) WorkspaceCreate(ctx context.Context, path string) (ws *protocol.WorkspaceView, created bool, err error) {

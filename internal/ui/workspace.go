@@ -27,6 +27,7 @@ type workspaceModal struct {
 	// may move while confirming).
 	delTarget string
 	delLabel  string
+	mkdirPath string // the missing directory the create confirmation is about
 	cur       int
 	mode      wsMode
 	input     lineEdit
@@ -40,6 +41,7 @@ const (
 	wsAdd
 	wsRename
 	wsDelete
+	wsMkdir // the typed directory is missing: offer to create it
 )
 
 func (w *workspaceModal) title() string { return w.loc.T("ws.title") }
@@ -114,6 +116,8 @@ func (w *workspaceModal) view(m *Model, wdt, h int) []string {
 			th.CardStyle(th.Subtle()).Render(w.loc.T("ws.title.pref"))+cardEditLine(th, true, &w.input))
 	case wsDelete:
 		lines = append(lines, "", w.loc.T("ws.delete.note", w.delLabel))
+	case wsMkdir:
+		lines = append(lines, "", w.loc.T("ws.mkdir.note", w.mkdirPath))
 	}
 	if w.err != "" {
 		lines = append(lines, th.CardStyle(th.Warn()).Render("  "+w.err))
@@ -146,6 +150,16 @@ func (w *workspaceModal) paste(text string) bool {
 		return false
 	}
 	return w.input.paste(text)
+}
+
+// wsDirCheckMsg answers the workspace add's host probe. Only a
+// confirmed missing directory flips the modal to the create
+// confirmation; existing directories and probe failures alike (an old
+// host without the listing endpoint) answer like the probe never ran —
+// the plain add, whose own error path reports real failures.
+type wsDirCheckMsg struct {
+	dir     string
+	missing bool
 }
 
 // update owns the modal's keyboard: row movement, the add/rename input
@@ -186,6 +200,16 @@ func (w *workspaceModal) update(km tea.KeyMsg) (tea.Cmd, bool) {
 		case km.Type == tea.KeyUp || km.Type == tea.KeyDown:
 			w.mode = wsPick
 			w.err = ""
+			return nil, true
+		}
+		return nil, false
+	case wsMkdir:
+		switch {
+		case km.Type == tea.KeyEsc:
+			w.mode = wsAdd // back to the line, the typed path kept for editing
+			w.err = ""
+			return nil, true
+		case km.String() == "y" || km.Type == tea.KeyEnter:
 			return nil, true
 		}
 		return nil, false
@@ -341,8 +365,17 @@ func (m *Model) workspacePerform(mod *workspaceModal) (tea.Cmd, bool) {
 		if val == "" {
 			return nil, true
 		}
+		// Relative spellings keep the direct add (the host resolves them
+		// against its own cwd); an absolute path is probed first, so a
+		// missing one can be offered for creation.
+		if !strings.HasPrefix(val, "/") {
+			m.closeModal()
+			return m.cmdWorkspaceAdd(val), true
+		}
+		return m.cmdWorkspaceDirCheck(val), true
+	case wsMkdir:
 		m.closeModal()
-		return m.cmdWorkspaceAdd(val), true
+		return m.cmdWorkspaceMkdirAdd(mod.mkdirPath), true
 	case wsRename:
 		ws := mod.current(0)
 		if ws == nil {
@@ -385,6 +418,49 @@ func (m *Model) cmdWorkspaceSwitch(workspaceID string) tea.Cmd {
 		m.inp.clear()
 		m.st.Notify(core.Notice{Level: "ok", Text: m.loc.T("ws.switched", workspacePathLabel(m.st.WorkspaceByID(workspaceID)))})
 		return createMsg{id: sid}
+	}
+}
+
+// cmdWorkspaceDirCheck probes an absolute add path on the host; the
+// answer lands as wsDirCheckMsg.
+func (m *Model) cmdWorkspaceDirCheck(dir string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := contextWithTimeout()
+		defer cancel()
+		missing, err := m.app.HostDirMissing(ctx, dir)
+		return wsDirCheckMsg{dir: dir, missing: err == nil && missing}
+	}
+}
+
+// cmdWorkspaceMkdirAdd creates a missing directory on the host — one
+// child segment per call, from the deepest existing ancestor downward —
+// then runs the add with the same flow as a plain add.
+func (m *Model) cmdWorkspaceMkdirAdd(dirPath string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := contextWithTimeout()
+		defer cancel()
+		dir := path.Clean(dirPath)
+		var tail []string
+		for dir != "/" && dir != "." && dir != "" {
+			missing, err := m.app.HostDirMissing(ctx, dir)
+			if err != nil {
+				m.st.Notify(core.Notice{Level: errLevel(err), Text: errText(err, "workspace mkdir"), Bell: true})
+				return dirtyMsg{}
+			}
+			if !missing {
+				break
+			}
+			tail = append([]string{path.Base(dir)}, tail...)
+			dir = path.Dir(dir)
+		}
+		for _, seg := range tail {
+			if err := m.app.HostMakeDir(ctx, dir, seg); err != nil {
+				m.st.Notify(core.Notice{Level: errLevel(err), Text: errText(err, "workspace mkdir"), Bell: true})
+				return dirtyMsg{}
+			}
+			dir = path.Join(dir, seg)
+		}
+		return m.cmdWorkspaceAdd(dirPath)()
 	}
 }
 

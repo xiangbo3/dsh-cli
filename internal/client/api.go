@@ -21,6 +21,20 @@ func (c *Client) Describe(ctx context.Context) (*protocol.HostDescription, error
 	return &v, nil
 }
 
+// HostListDir probes one host directory level; the listing itself is
+// discarded — callers discriminate on the failure code (a directory
+// that is not there answers DirUnreadable).
+func (c *Client) HostListDir(ctx context.Context, dirPath string) error {
+	var raw json.RawMessage
+	return c.call(ctx, protocol.MHostListDir, map[string]string{"path": dirPath}, &raw)
+}
+
+// HostMakeDir creates one child directory under an existing parent.
+func (c *Client) HostMakeDir(ctx context.Context, parent, name string) error {
+	var raw json.RawMessage
+	return c.call(ctx, protocol.MHostMakeDir, map[string]string{"path": parent, "name": name}, &raw)
+}
+
 // ListSessions returns all persisted sessions, updatedAt descending.
 func (c *Client) ListSessions(ctx context.Context) (*protocol.SessionListResponse, error) {
 	var v protocol.SessionListResponse

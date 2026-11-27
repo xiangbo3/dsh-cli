@@ -38,6 +38,11 @@ type fakeHost struct {
 	discovered map[string][]protocol.DiscoveredModel
 	lastMutate [][]byte
 
+	// dirs is the picker's host filesystem when set (nil: every listing
+	// succeeds); made records the directories host.createDirectory drew.
+	dirs map[string]bool
+	made []string
+
 	mu      sync.Mutex
 	calls   []string
 	nextSeq int
@@ -114,12 +119,21 @@ func (fh *fakeHost) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	time.Sleep(fakeLatency)
-	value, _ := json.Marshal(fh.unary(path, env.Payload))
+	value := fh.unary(path, env.Payload)
 	w.Header().Set("Content-Type", "application/json")
+	if rpcErr, ok := value.(*protocol.RpcError); ok {
+		_ = json.NewEncoder(w).Encode(protocol.Envelope{
+			Type:   protocol.TypeServerResponse,
+			RpcId:  env.RpcId,
+			Result: &protocol.Result{Ok: false, Error: rpcErr},
+		})
+		return
+	}
+	raw, _ := json.Marshal(value)
 	_ = json.NewEncoder(w).Encode(protocol.Envelope{
 		Type:   protocol.TypeServerResponse,
 		RpcId:  env.RpcId,
-		Result: &protocol.Result{Ok: true, Value: value},
+		Result: &protocol.Result{Ok: true, Value: raw},
 	})
 }
 
@@ -237,6 +251,35 @@ func (fh *fakeHost) unary(method string, payload json.RawMessage) any {
 			Workspace: &protocol.WorkspaceView{WorkspaceId: "w1", Path: p.Path},
 			Created:   true,
 		}
+	case protocol.MHostListDir:
+		var p struct {
+			Path string `json:"path"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		fh.mu.Lock()
+		known := fh.dirs != nil && !fh.dirs[p.Path]
+		fh.mu.Unlock()
+		if known {
+			return &protocol.RpcError{Code: protocol.DirUnreadable, Message: "cannot list " + p.Path}
+		}
+		return map[string]any{"path": p.Path, "entries": []any{}}
+	case protocol.MHostMakeDir:
+		var p struct {
+			Path string `json:"path"`
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		joined := p.Path + "/" + p.Name
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.dirs != nil && !fh.dirs[p.Path] {
+			return &protocol.RpcError{Code: protocol.DirCreateFail, Message: "cannot create under " + p.Path}
+		}
+		if fh.dirs != nil {
+			fh.dirs[joined] = true
+		}
+		fh.made = append(fh.made, joined)
+		return map[string]any{"path": joined}
 	}
 	return map[string]any{}
 }

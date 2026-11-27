@@ -1198,32 +1198,44 @@ func (p *addModelPicker) view(m *Model, w, h int) []string {
 
 // ---- model entry editor -----------------------------------------------------------
 
+// modInputRow is the field index of the input-type checkbox row (the
+// web editor's "Input types" row), just below the four text fields.
+const modInputRow = 4
+
 // modelEdit is the add/edit form for one provider model entry — the web
 // settings page's model row in form shape: id, display name, context
-// window, max output. ↑↓/tab walk the fields, enter saves, esc cancels.
-// A blank capacity field leaves the key unset in the stored entry.
+// window, max output, input types. ↑↓/tab walk the fields, enter saves,
+// esc cancels. A blank capacity field leaves the key unset in the
+// stored entry; the input row mirrors the web checkboxes (the set never
+// empties, and the key stays stored until a toggle touches it).
 type modelEdit struct {
-	provider string          // provider whose settings entry is written
-	origId   string          // stored entry being replaced ("" = fresh entry)
-	base     json.RawMessage // the stored entry kept while writing (nil for new)
-	edits    [4]lineEdit     // id, name, context window, max output
-	cur      int
-	err      string
-	saving   bool
-	loc      *i18n.Locale
+	provider   string          // provider whose settings entry is written
+	origId     string          // stored entry being replaced ("" = fresh entry)
+	base       json.RawMessage // the stored entry kept while writing (nil for new)
+	edits      [4]lineEdit     // id, name, context window, max output
+	cur        int
+	inputOn    [2]bool // text, image
+	inputCur   int     // checkbox the caret sits on (when cur == modInputRow)
+	inputDirty bool    // a toggle touched the set (only then does the save write it)
+	err        string
+	saving     bool
+	loc        *i18n.Locale
 }
 
 // newModelEdit fills the form from the stored entry (nil base = a fresh
 // one; seedId/seedName are what the catalog already knows).
 func newModelEdit(loc *i18n.Locale, provider, origId string, base json.RawMessage, seedId, seedName string) *modelEdit {
 	e := &modelEdit{loc: loc, provider: provider, origId: origId, base: base}
+	e.inputOn[0] = true // the web fallback: text
 	set := func(i int, s string) { e.edits[i] = lineEdit{val: []rune(s), cur: len(s)} }
 	set(0, seedId)
 	set(1, seedName)
 	var stored struct {
-		Name          string      `json:"name"`
-		ContextWindow json.Number `json:"contextWindow"`
-		MaxTokens     json.Number `json:"maxTokens"`
+		Name            string      `json:"name"`
+		ContextWindow   json.Number `json:"contextWindow"`
+		MaxTokens       json.Number `json:"maxTokens"`
+		InputModalities []string    `json:"inputModalities"`
+		Input           []string    `json:"input"` // the pi-ai routes' key
 	}
 	if len(base) > 0 && json.Unmarshal(base, &stored) == nil {
 		if stored.Name != "" {
@@ -1231,14 +1243,42 @@ func newModelEdit(loc *i18n.Locale, provider, origId string, base json.RawMessag
 		}
 		set(2, stored.ContextWindow.String())
 		set(3, stored.MaxTokens.String())
+		mods := stored.InputModalities
+		if len(mods) == 0 {
+			mods = stored.Input
+		}
+		if on := [2]bool{}; len(mods) > 0 {
+			for _, mo := range mods {
+				switch mo {
+				case "text":
+					on[0] = true
+				case "image":
+					on[1] = true
+				}
+			}
+			e.inputOn = on
+		}
 	}
 	return e
 }
 
-// labels are the four field labels, padded to one column so the fields
+// selInput lists the checked modalities in the web's canonical order
+// (never empty: update refuses to clear the last check).
+func (e *modelEdit) selInput() []string {
+	var out []string
+	if e.inputOn[0] {
+		out = append(out, "text")
+	}
+	if e.inputOn[1] {
+		out = append(out, "image")
+	}
+	return out
+}
+
+// labels are the five field labels, padded to one column so the fields
 // line up.
-func (e *modelEdit) labels() [4]string {
-	raw := [4]string{e.loc.T("moledit.f.id"), e.loc.T("moledit.f.name"), e.loc.T("moledit.f.ctx"), e.loc.T("moledit.f.max")}
+func (e *modelEdit) labels() [5]string {
+	raw := [5]string{e.loc.T("moledit.f.id"), e.loc.T("moledit.f.name"), e.loc.T("moledit.f.ctx"), e.loc.T("moledit.f.max"), e.loc.T("moledit.f.input")}
 	for i, s := range raw {
 		for plainWidth(s) < 10 {
 			s += " "
@@ -1260,10 +1300,11 @@ func (e *modelEdit) hint() string { return e.loc.T("moledit.hint") }
 func (e *modelEdit) view(m *Model, w, h int) []string {
 	th := m.th
 	labels := e.labels()
-	lines := make([]string, 0, len(e.edits)+2)
+	lines := make([]string, 0, modInputRow+3)
 	for i := range e.edits {
 		lines = append(lines, th.Card().Render("  ")+th.CardStyle(th.Subtle()).Render(labels[i])+cardEditLine(th, i == e.cur, &e.edits[i]))
 	}
+	lines = append(lines, th.Card().Render("  ")+th.CardStyle(th.Subtle()).Render(labels[modInputRow])+e.inputView(th))
 	lines = append(lines, "")
 	switch {
 	case e.saving:
@@ -1274,6 +1315,26 @@ func (e *modelEdit) view(m *Model, w, h int) []string {
 	return lines
 }
 
+// inputView renders the two input-type checkboxes; with the row focused
+// the caret's checkbox takes the accent (the pickers' cue).
+func (e *modelEdit) inputView(th *Theme) string {
+	names := [2]string{e.loc.T("moledit.in.text"), e.loc.T("moledit.in.image")}
+	var s string
+	for i := range names {
+		box := " "
+		st := th.Subtle()
+		if e.inputOn[i] {
+			box = "x"
+			st = th.Plain()
+		}
+		if e.cur == modInputRow && e.inputCur == i {
+			st = th.Accent()
+		}
+		s += th.CardStyle(st).Render("["+box+"] "+names[i]) + "  "
+	}
+	return s
+}
+
 func (e *modelEdit) update(km tea.KeyMsg) (tea.Cmd, bool) {
 	switch {
 	case km.Type == tea.KeyUp:
@@ -1281,14 +1342,28 @@ func (e *modelEdit) update(km tea.KeyMsg) (tea.Cmd, bool) {
 			e.cur--
 		}
 	case km.Type == tea.KeyDown:
-		if e.cur < len(e.edits)-1 {
+		if e.cur < modInputRow {
 			e.cur++
 		}
 	case km.Type == tea.KeyTab:
-		e.cur = (e.cur + 1) % len(e.edits)
+		e.cur = (e.cur + 1) % (modInputRow + 1)
 	case km.Type == tea.KeyEnter, km.Type == tea.KeyEsc:
 		// The dispatch saves (after validating) or closes.
 		return nil, true
+	case e.cur == modInputRow:
+		// The checkbox row: ←→ walk the boxes, space flips one (the
+		// set never empties — the web disables the last check).
+		switch km.Type {
+		case tea.KeyLeft:
+			e.inputCur = 0
+		case tea.KeyRight:
+			e.inputCur = 1
+		case tea.KeySpace:
+			if !e.inputOn[e.inputCur] || e.inputOn[0] && e.inputOn[1] {
+				e.inputOn[e.inputCur] = !e.inputOn[e.inputCur]
+				e.inputDirty = true
+			}
+		}
 	default:
 		// Field text: the main input box's editor semantics.
 		e.edits[e.cur].handleKey(km)
@@ -1306,7 +1381,12 @@ func (e *modelEdit) mouseFields(m *Model) []editField {
 	return fields
 }
 
-func (e *modelEdit) paste(text string) bool { return e.edits[e.cur].paste(text) }
+func (e *modelEdit) paste(text string) bool {
+	if e.cur >= len(e.edits) {
+		return false // the input row holds checkboxes, not text
+	}
+	return e.edits[e.cur].paste(text)
+}
 
 // values returns the validated draft: trimmed id and name, the two
 // capacities (0 = unset); err is set when the draft must not save.

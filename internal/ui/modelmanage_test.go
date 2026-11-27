@@ -235,6 +235,114 @@ func TestModelPickerEditEntry(t *testing.T) {
 	}
 }
 
+// TestModelPickerEditInputTypes pins the form's input-type row: the
+// stored modalities prefill the boxes, the last check refuses to clear,
+// and a checked box rewrites the key under the route's own name.
+func TestModelPickerEditInputTypes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fh := newFakeHost(t)
+	fh.sessions = []protocol.SessionSummary{{SessionId: "s1"}}
+	fh.settings = map[string]json.RawMessage{
+		"llm-pi-ai": []byte(`{"providers":{"custom":{"baseURL":"http://upstream/v1","api":"openai-completions","models":[{"id":"m1","name":"M1","input":["text"]}]}}}`),
+	}
+	fh.models = protocol.SessionModels{
+		Groups: []protocol.ModelProviderGroup{
+			{Id: "custom", Name: "Custom", Models: []protocol.ModelCatalogModel{{Id: "m1", Name: "M1"}}},
+		},
+	}
+	a := app.New(fh.URL)
+	a.Start(ctx)
+	m := NewModel(a)
+	m.loc = i18n.English()
+	m.st.SetActive("s1")
+	m.openModelPicker()
+	m.Update(modelsLoadedMsg{id: "s1", models: &fh.models})
+
+	_, cmd := m.Update(keyRunes("e"))
+	m.Update(cmd())
+	ed, ok := m.topModal().(*modelEdit)
+	if !ok {
+		t.Fatalf("top modal = %T (want the entry form)", m.topModal())
+	}
+	if !ed.inputOn[0] || ed.inputOn[1] || ed.inputDirty {
+		t.Fatalf("modalities = %v (want the stored text-only input prefilled)", ed.inputOn)
+	}
+	if ln := ed.view(m, 0, 0)[modInputRow]; !strings.Contains(ln, "[x]") || !strings.Contains(ln, "[ ]") {
+		t.Fatalf("input row = %q (want text checked, image clear)", stripANSI(ln))
+	}
+
+	// Walk to the input row; space on the only check is refused (the
+	// set never empties).
+	for i := 0; i < modInputRow; i++ {
+		m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if ed.cur != modInputRow {
+		t.Fatalf("cursor on field %d (want the input row)", ed.cur)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if !ed.inputOn[0] || ed.inputDirty {
+		t.Fatalf("the last check cleared (inputOn=%v dirty=%v)", ed.inputOn, ed.inputDirty)
+	}
+
+	// Right onto image, check it, save: the pi-ai route stores "input".
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if !ed.inputOn[1] || !ed.inputDirty {
+		t.Fatalf("image toggle lost (inputOn=%v dirty=%v)", ed.inputOn, ed.inputDirty)
+	}
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter should return the save cmd")
+	}
+	m.Update(cmd())
+
+	models, _ := mutateModels(t, fh)
+	in, _ := models[0]["input"].([]any)
+	if len(in) != 2 || in[0] != "text" || in[1] != "image" {
+		t.Fatalf("entry = %+v (want input rewritten to text+image)", models[0])
+	}
+}
+
+// TestMergeModelEntryInput pins the write-side key mapping: the modal
+// key only moves once a toggle touched the set, the pi-ai routes keep
+// their own key name, and dropping image drops its knobs.
+func TestMergeModelEntryInput(t *testing.T) {
+	base := json.RawMessage(`{"id":"m1","inputModalities":["text","image"],"imageMaxBytes":4194304}`)
+	// Untouched: the stored key stays as it was.
+	e, err := mergeModelEntry(base, "m1", "", 0, 0, "acme", []string{"text"}, false)
+	if err != nil {
+		t.Fatalf("untouched merge: %v", err)
+	}
+	if arr, ok := e["inputModalities"].([]any); !ok || len(arr) != 2 {
+		t.Fatalf("untouched merge = %+v", e)
+	}
+	if _, ok := e["imageMaxBytes"]; !ok {
+		t.Fatal("untouched merge dropped the stored knob")
+	}
+	// Checked down to text: the knob goes with the image input.
+	e, _ = mergeModelEntry(base, "m1", "", 0, 0, "acme", []string{"text"}, true)
+	if got := e["inputModalities"].([]string); len(got) != 1 || got[0] != "text" {
+		t.Fatalf("modalities = %v", got)
+	}
+	if _, ok := e["imageMaxBytes"]; ok {
+		t.Fatal("imageMaxBytes should clear with the image input")
+	}
+	// A pi-ai route keeps its own key name (and loses the foreign one).
+	e, _ = mergeModelEntry(base, "m1", "", 0, 0, "llm-pi-ai", []string{"image"}, true)
+	if got := e["input"].([]string); len(got) != 1 || got[0] != "image" {
+		t.Fatalf("pi-ai input = %v", got)
+	}
+	if _, ok := e["inputModalities"]; ok {
+		t.Fatal("the foreign key should not linger")
+	}
+	// A fresh entry without a touch gets no modal key at all.
+	e, _ = mergeModelEntry(nil, "m2", "", 0, 0, "acme", []string{"text"}, false)
+	if _, ok := e["inputModalities"]; ok {
+		t.Fatalf("untouched fresh entry = %+v (want no modal key)", e)
+	}
+}
+
 // TestModelPickerDeleteEntry pins the `d` key: a stored entry is removed
 // from the provider's models (the rest kept), and a catalog-only model
 // reports "not a stored entry" without a write.
